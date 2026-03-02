@@ -3,9 +3,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1317,6 +1323,233 @@ func uniqueStrings(values []string) []string {
 	return result
 }
 
+// ── Kubernetes helpers ────────────────────────────────────────────────────────
+
+const (
+	k8sTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	k8sCAPath        = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	k8sNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+)
+
+func isRunningInKubernetes() bool {
+	_, err := os.Stat(k8sTokenPath)
+	return err == nil
+}
+
+// k8sClient holds the shared HTTP client and bearer token for in-cluster API
+// calls. Create once with newK8sClient() and reuse for all operations.
+type k8sClient struct {
+	http    *http.Client
+	token   string
+	apiBase string
+}
+
+func newK8sClient() (*k8sClient, error) {
+	ca, err := os.ReadFile(k8sCAPath)
+	if err != nil {
+		return nil, fmt.Errorf("read cluster CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(ca)
+
+	token, err := os.ReadFile(k8sTokenPath)
+	if err != nil {
+		return nil, fmt.Errorf("read service account token: %w", err)
+	}
+
+	host := os.Getenv("KUBERNETES_SERVICE_HOST")
+	port := os.Getenv("KUBERNETES_SERVICE_PORT")
+	return &k8sClient{
+		http: &http.Client{
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
+			Timeout:   15 * time.Second,
+		},
+		token:   strings.TrimSpace(string(token)),
+		apiBase: fmt.Sprintf("https://%s:%s", host, port),
+	}, nil
+}
+
+// patchSecret patches the named Secret with stringData.
+// The secret must already exist (created by the Helm chart).
+func (k *k8sClient) patchSecret(secretName, namespace string, data map[string]string) error {
+	body, err := json.Marshal(map[string]any{"stringData": data})
+	if err != nil {
+		return fmt.Errorf("marshal secret patch: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/namespaces/%s/secrets/%s", k.apiBase, namespace, secretName)
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+k.token)
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+
+	resp, err := k.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("patch secret: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("patch secret returned HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// restartDeployment triggers a rolling restart by patching the restartedAt
+// annotation on the pod template. If Stakater Reloader annotations are present
+// on the deployment, the explicit restart is skipped — Reloader will handle it
+// automatically when the Secret changes.
+func (k *k8sClient) restartDeployment(deploymentName, namespace, zitadelSecretName string) error {
+	url := fmt.Sprintf("%s/apis/apps/v1/namespaces/%s/deployments/%s", k.apiBase, namespace, deploymentName)
+
+	// GET the deployment to inspect Reloader annotations.
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build GET request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+k.token)
+
+	resp, err := k.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("get deployment: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		fmt.Printf("  ℹ️  deployment %q not found — skipping restart\n", deploymentName)
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("get deployment returned HTTP %d: %s", resp.StatusCode, string(b))
+	}
+
+	var deploy struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&deploy); err != nil {
+		return fmt.Errorf("decode deployment: %w", err)
+	}
+
+	ann := deploy.Metadata.Annotations
+	if ann["reloader.stakater.com/auto"] == "true" {
+		fmt.Printf("  ℹ️  Reloader auto-watch detected on %q — skipping manual restart\n", deploymentName)
+		return nil
+	}
+	if reload := ann["secret.reloader.stakater.com/reload"]; reload != "" {
+		for _, name := range strings.Split(reload, ",") {
+			if strings.TrimSpace(name) == zitadelSecretName {
+				fmt.Printf("  ℹ️  Reloader secret-watch detected on %q — skipping manual restart\n", deploymentName)
+				return nil
+			}
+		}
+	}
+
+	// No Reloader — patch the restartedAt annotation.
+	patch := map[string]any{
+		"spec": map[string]any{
+			"template": map[string]any{
+				"metadata": map[string]any{
+					"annotations": map[string]string{
+						"kubectl.kubernetes.io/restartedAt": time.Now().UTC().Format(time.RFC3339),
+					},
+				},
+			},
+		},
+	}
+	body, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("marshal restart patch: %w", err)
+	}
+
+	req2, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build PATCH request: %w", err)
+	}
+	req2.Header.Set("Authorization", "Bearer "+k.token)
+	req2.Header.Set("Content-Type", "application/merge-patch+json")
+
+	resp2, err := k.http.Do(req2)
+	if err != nil {
+		return fmt.Errorf("patch deployment: %w", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode < 200 || resp2.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp2.Body)
+		return fmt.Errorf("patch deployment returned HTTP %d: %s", resp2.StatusCode, string(b))
+	}
+	return nil
+}
+
+// writeKubernetesSecretFromEnv reads K8S_* env vars and patches the Zitadel
+// Secret with the generated credentials.
+func writeKubernetesSecretFromEnv(k *k8sClient, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey string) error {
+	secretName := os.Getenv("K8S_SECRET_NAME")
+	namespace := os.Getenv("K8S_NAMESPACE")
+	if namespace == "" {
+		// Fallback: read from the service account namespace file.
+		if b, err := os.ReadFile(k8sNamespacePath); err == nil {
+			namespace = strings.TrimSpace(string(b))
+		}
+	}
+	if secretName == "" || namespace == "" {
+		return fmt.Errorf("K8S_SECRET_NAME and K8S_NAMESPACE must be set")
+	}
+
+	keyClientID := envOrDefault("K8S_KEY_CLIENT_ID", "client-id")
+	keyClientSecret := envOrDefault("K8S_KEY_CLIENT_SECRET", "client-secret")
+	keyLoginToken := envOrDefault("K8S_KEY_LOGIN_SERVICE_USER_TOKEN", "login-service-user-token")
+	keyFrontendClientID := envOrDefault("K8S_KEY_FRONTEND_CLIENT_ID", "frontend-client-id")
+	keyIdpSyncKey := envOrDefault("K8S_KEY_WEBHOOK_IDP_SYNC_KEY", "webhook-idp-sync-key")
+	keyComplementTokenKey := envOrDefault("K8S_KEY_WEBHOOK_COMPLEMENT_TOKEN_KEY", "webhook-complement-token-key")
+
+	data := map[string]string{
+		keyClientID:           apiClientID,
+		keyClientSecret:       apiClientSecret,
+		keyLoginToken:         loginServiceToken,
+		keyFrontendClientID:   frontendClientID,
+		keyIdpSyncKey:         idpSyncKey,
+		keyComplementTokenKey: complementTokenKey,
+	}
+
+	if err := k.patchSecret(secretName, namespace, data); err != nil {
+		return fmt.Errorf("patch zitadel secret %q: %w", secretName, err)
+	}
+	fmt.Printf("✅ Patched Kubernetes secret %q with Zitadel credentials\n", secretName)
+	return nil
+}
+
+// restartZitadelConsumers restarts the API, frontend, and login-ui deployments
+// (skipping any that aren't found or that Reloader already watches).
+func restartZitadelConsumers(k *k8sClient) {
+	secretName := os.Getenv("K8S_SECRET_NAME")
+	namespace := os.Getenv("K8S_NAMESPACE")
+
+	for _, envVar := range []string{"K8S_API_DEPLOYMENT", "K8S_FRONTEND_DEPLOYMENT", "K8S_LOGIN_UI_DEPLOYMENT"} {
+		name := os.Getenv(envVar)
+		if name == "" {
+			continue
+		}
+		fmt.Printf("  → restarting %q ...\n", name)
+		if err := k.restartDeployment(name, namespace, secretName); err != nil {
+			fmt.Printf("  ⚠️  restart %q: %v\n", name, err)
+		}
+	}
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Config file writer ────────────────────────────────────────────────────────
+
 func writeConfigFiles(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string) error {
 	// Write deploy/.env - SINGLE SOURCE OF TRUTH for all environment variables
 	// All docker-compose services read from this file via env_file: - ./.env
@@ -1527,10 +1760,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Write configuration files
-	if err := writeConfigFiles(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginUserID, idpSyncKey, complementTokenKey); err != nil {
-		fmt.Printf("❌ Failed to write config files: %v\n", err)
-		os.Exit(1)
+	// Write credentials — K8s: patch the Secret directly; Docker Compose: write .env.
+	if isRunningInKubernetes() {
+		k8s, err := newK8sClient()
+		if err != nil {
+			fmt.Printf("❌ Failed to create Kubernetes client: %v\n", err)
+			os.Exit(1)
+		}
+		if err := writeKubernetesSecretFromEnv(k8s, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey); err != nil {
+			fmt.Printf("❌ Failed to patch Kubernetes secret: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println()
+		fmt.Println("--- Restarting Zitadel consumers ---")
+		restartZitadelConsumers(k8s)
+	} else {
+		if err := writeConfigFiles(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginUserID, idpSyncKey, complementTokenKey); err != nil {
+			fmt.Printf("❌ Failed to write config files: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	fmt.Println()
