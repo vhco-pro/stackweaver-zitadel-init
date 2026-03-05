@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 	actionV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/action/v2"
 	applicationV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/application/v2"
+	featureV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/feature/v2"
 	filterpb "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/filter/v2"
 	idppb "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/idp"
 	internalpermission "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/internal_permission/v2"
@@ -56,6 +57,7 @@ type ZitadelClient struct {
 	internalPermission internalpermission.InternalPermissionServiceClient
 	mgmtService        management.ManagementServiceClient
 	actionService      actionV2.ActionServiceClient
+	featureService     featureV2.FeatureServiceClient
 	orgID              string
 }
 
@@ -103,6 +105,7 @@ func NewZitadelClient(accessToken, dialAddr, domain string) (*ZitadelClient, err
 		internalPermission: api.InternalPermissionServiceV2(),
 		mgmtService:        api.ManagementService(),
 		actionService:      api.ActionServiceV2(),
+		featureService:     api.FeatureServiceV2(),
 	}, nil
 }
 
@@ -292,6 +295,26 @@ func (c *ZitadelClient) GetOrCreateFrontendApp(orgID, projectID string, extraRed
 	}
 	
 	return clientID, nil
+}
+
+// EnsureLoginV2BaseURI sets the Login V2 BaseURI on the Zitadel instance via the Feature API.
+// This overrides whatever was stored in the database during initial setup (DefaultInstance.Features.LoginV2.BaseURI
+// in defaults.yaml only applies on first init; this call updates it on every zitadel-init run).
+func (c *ZitadelClient) EnsureLoginV2BaseURI(baseURI string) error {
+	if baseURI == "" {
+		return nil
+	}
+	_, err := c.featureService.SetInstanceFeatures(c.ctx, &featureV2.SetInstanceFeaturesRequest{
+		LoginV2: &featureV2.LoginV2{
+			Required: true,
+			BaseUri:  &baseURI,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("SetInstanceFeatures LoginV2 BaseURI: %w", err)
+	}
+	fmt.Printf("✅ Login V2 BaseURI set to: %s\n", baseURI)
+	return nil
 }
 
 // ensureFrontendRedirectURIs checks if the existing app's redirect URIs contain all desired URIs.
@@ -1726,6 +1749,16 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("✅ Login service user ready: %s\n", loginUserID)
+
+	// Ensure the Login V2 BaseURI points to the public login-ui URL.
+	// The ConfigMap's DefaultInstance.Features.LoginV2.BaseURI only applies on first Zitadel init
+	// and uses the internal service name (not browser-reachable). This call updates the database
+	// via the Feature API on every zitadel-init run, so the URL stays correct after domain changes.
+	if loginUIBaseURL := os.Getenv("LOGIN_UI_BASE_URL"); loginUIBaseURL != "" {
+		if err := client.EnsureLoginV2BaseURI(loginUIBaseURL); err != nil {
+			fmt.Printf("⚠️  Warning: could not set Login V2 BaseURI: %v\n", err)
+		}
+	}
 
 	// Ensure trusted + custom domains so Zitadel is reachable on both ExternalDomain and localhost.
 	// Sources: env ZITADEL_CUSTOM_DOMAINS (comma-separated) or deploy/zitadel-init.yaml (custom_domains).
