@@ -59,12 +59,16 @@ type ZitadelClient struct {
 	orgID              string
 }
 
-func NewZitadelClient(accessToken, dialAddr string) (*ZitadelClient, error) {
+func NewZitadelClient(accessToken, dialAddr, domain string) (*ZitadelClient, error) {
 	ctx := context.Background()
 
-	// Use localhost as domain to match ExternalDomain
-	// Both SDK and network connections use localhost:8080 (forwarded from Docker)
-	zitadelInstance := zitadelpkg.New("localhost", zitadelpkg.WithInsecure("8080"))
+	// domain must match Zitadel's ExternalDomain so the gRPC :authority header
+	// resolves to the correct instance. Docker Compose uses "localhost"; Kubernetes
+	// passes the ingress auth hostname via ZITADEL_DOMAIN.
+	if domain == "" {
+		domain = "localhost"
+	}
+	zitadelInstance := zitadelpkg.New(domain, zitadelpkg.WithInsecure("8080"))
 
 	if dialAddr == "" {
 		dialAddr = "internal-zitadel:8080"
@@ -1637,6 +1641,10 @@ func main() {
 		internalAddr = "internal-zitadel:8080"
 	}
 
+	// ZITADEL_DOMAIN must match Zitadel's ExternalDomain so the gRPC :authority
+	// header resolves to the correct instance. Defaults to "localhost" for Docker Compose.
+	domain := os.Getenv("ZITADEL_DOMAIN")
+
 	var accessToken string
 	if patFromEnv := os.Getenv("ZITADEL_PAT"); patFromEnv != "" {
 		accessToken = patFromEnv
@@ -1659,8 +1667,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create client - uses localhost issuer but dials the Docker alias
-	client, err := NewZitadelClient(accessToken, internalAddr)
+	// Create client - domain sets the gRPC :authority header to match Zitadel's ExternalDomain
+	client, err := NewZitadelClient(accessToken, internalAddr, domain)
 	if err != nil {
 		fmt.Printf("❌ Failed to create Zitadel client: %v\n", err)
 		os.Exit(1)
