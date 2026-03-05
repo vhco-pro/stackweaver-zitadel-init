@@ -1696,6 +1696,15 @@ func main() {
 		extraPostLogoutURIs = initCfg.FrontendPostLogoutRedirectURIs
 	}
 
+	// Also read redirect URIs from environment variables (used by the Helm chart
+	// to inject the production app URL without requiring a mounted config file).
+	if v := os.Getenv("FRONTEND_REDIRECT_URI"); v != "" {
+		extraRedirectURIs = append(extraRedirectURIs, v)
+	}
+	if v := os.Getenv("FRONTEND_POST_LOGOUT_URI"); v != "" {
+		extraPostLogoutURIs = append(extraPostLogoutURIs, v)
+	}
+
 	// Create or get frontend app (with extra redirect URIs for tunnel access)
 	frontendClientID, err := client.GetOrCreateFrontendApp(orgID, projectID, extraRedirectURIs, extraPostLogoutURIs)
 	if err != nil {
