@@ -1839,6 +1839,30 @@ func main() {
 	fmt.Printf("Frontend Client ID: %s\n", frontendClientID)
 	fmt.Printf("API Client ID: %s\n", apiClientID)
 	fmt.Println()
+
+	// In Kubernetes the sidecar must not exit (Deployment restartPolicy: Always
+	// would cause a restart loop). Serve a health endpoint and block forever;
+	// if the pod restarts due to an upgrade, the sidecar re-provisions idempotently.
+	if isRunningInKubernetes() {
+		healthPort := os.Getenv("HEALTH_PORT")
+		if healthPort == "" {
+			healthPort = "8081"
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, "ok")
+		})
+		go func() {
+			fmt.Printf("Health endpoint listening on :%s/healthz\n", healthPort)
+			if err := http.ListenAndServe(":"+healthPort, mux); err != nil {
+				fmt.Printf("⚠️  Health server error: %v\n", err)
+			}
+		}()
+		fmt.Println("Provisioning complete, entering idle state (sidecar mode).")
+		select {}
+	}
+
 	fmt.Println("Configuration files have been written.")
 	fmt.Println("Restart your services to pick up the new config.")
 }
