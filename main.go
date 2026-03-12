@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -448,10 +449,14 @@ func (c *ZitadelClient) GetOrCreateAPIApp(orgID, projectID string) (string, stri
 }
 
 func waitForPAT(patPath string) (string, error) {
-	fmt.Printf("⏳ Waiting for PAT file at %s...\n", patPath)
+	return waitForPATWithTimeout(patPath, maxWait)
+}
+
+func waitForPATWithTimeout(patPath string, timeout time.Duration) (string, error) {
+	fmt.Printf("⏳ Waiting for PAT file at %s (timeout %v)...\n", patPath, timeout)
 
 	start := time.Now()
-	for time.Since(start) < maxWait {
+	for time.Since(start) < timeout {
 		data, err := os.ReadFile(patPath)
 		if err == nil && len(data) > 0 {
 			pat := strings.TrimSpace(string(data))
@@ -468,7 +473,7 @@ func waitForPAT(patPath string) (string, error) {
 		time.Sleep(waitInterval)
 	}
 
-	return "", fmt.Errorf("PAT file not found after %v", maxWait)
+	return "", fmt.Errorf("PAT file not found after %v", timeout)
 }
 
 func waitForZitadelReady(grpcAddr string) error {
@@ -1396,6 +1401,45 @@ func newK8sClient() (*k8sClient, error) {
 	}, nil
 }
 
+// readSecretKey reads a single key from a Kubernetes Secret.
+// Returns the decoded value, or empty string if the key is missing or empty.
+func (k *k8sClient) readSecretKey(secretName, namespace, key string) (string, error) {
+	url := fmt.Sprintf("%s/api/v1/namespaces/%s/secrets/%s", k.apiBase, namespace, secretName)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+k.token)
+
+	resp, err := k.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("get secret: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("get secret returned HTTP %d", resp.StatusCode)
+	}
+
+	var secret struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
+		return "", fmt.Errorf("decode secret: %w", err)
+	}
+
+	encoded, ok := secret.Data[key]
+	if !ok || encoded == "" {
+		return "", nil
+	}
+
+	// K8s secret .data values are base64-encoded
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decode base64 value for key %q: %w", key, err)
+	}
+	return strings.TrimSpace(string(decoded)), nil
+}
+
 // patchSecret patches the named Secret with stringData.
 // The secret must already exist (created by the Helm chart).
 func (k *k8sClient) patchSecret(secretName, namespace string, data map[string]string) error {
@@ -1668,11 +1712,72 @@ func main() {
 	// header resolves to the correct instance. Defaults to "localhost" for Docker Compose.
 	domain := os.Getenv("ZITADEL_DOMAIN")
 
+	// Acquire an admin PAT. In Kubernetes the sidecar shares an emptyDir with
+	// the main Zitadel container. Zitadel writes the PAT file only during
+	// FirstInstance (fresh DB). On pod restarts with an existing DB, the
+	// emptyDir is empty and the PAT file never appears. To handle this:
+	//
+	//   1. ZITADEL_PAT env var (highest priority, always works)
+	//   2. PAT file from emptyDir (first boot — Zitadel writes it)
+	//   3. K8s Secret fallback (pod restart — stored by a previous init run)
+	//
+	// After a successful file-based read, the PAT is also persisted into the
+	// K8s Secret so future pod restarts can use source (3).
 	var accessToken string
+	var k8s *k8sClient       // lazily created, reused later for secret writes
+	var patFromFile bool      // track source so we know whether to store it
+
 	if patFromEnv := os.Getenv("ZITADEL_PAT"); patFromEnv != "" {
 		accessToken = patFromEnv
 		fmt.Println("✅ Using PAT from environment variable")
+	} else if isRunningInKubernetes() {
+		// K8s sidecar mode: wait for Zitadel first (the PAT file is written
+		// before Zitadel starts serving, so it should exist by readiness).
+		if err := waitForZitadelReady(internalAddr); err != nil {
+			fmt.Printf("❌ Zitadel not ready: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Short grace period for the PAT file (on first boot it's already
+		// there; on restarts it will never appear, so don't waste 5 minutes).
+		pat, err := waitForPATWithTimeout(patPath, 30*time.Second)
+		if err == nil {
+			accessToken = pat
+			patFromFile = true
+			fmt.Println("✅ Using PAT from file")
+		} else {
+			// Fallback: read admin PAT from K8s Secret (stored by a previous run).
+			fmt.Println("⚠️  PAT file not found, trying K8s Secret fallback...")
+			var k8sErr error
+			k8s, k8sErr = newK8sClient()
+			if k8sErr != nil {
+				fmt.Printf("❌ Failed to create K8s client: %v\n", k8sErr)
+				os.Exit(1)
+			}
+			secretName := os.Getenv("K8S_SECRET_NAME")
+			namespace := os.Getenv("K8S_NAMESPACE")
+			if namespace == "" {
+				if b, readErr := os.ReadFile(k8sNamespacePath); readErr == nil {
+					namespace = strings.TrimSpace(string(b))
+				}
+			}
+			adminPATKey := envOrDefault("K8S_KEY_ADMIN_PAT", "admin-pat")
+			storedPAT, readErr := k8s.readSecretKey(secretName, namespace, adminPATKey)
+			if readErr != nil {
+				fmt.Printf("❌ Failed to read admin PAT from K8s Secret: %v\n", readErr)
+				os.Exit(1)
+			}
+			if storedPAT == "" {
+				fmt.Println("❌ No admin PAT found in K8s Secret (first install may not have completed)")
+				fmt.Println("   If this is a reinstall with an existing database, delete the postgresql PVC")
+				fmt.Println("   and the zitadel secret to allow a clean first-time initialization.")
+				os.Exit(1)
+			}
+			accessToken = storedPAT
+			fmt.Println("✅ Using admin PAT from K8s Secret (stored by previous init run)")
+		}
 	} else {
+		// Docker Compose mode: wait the full duration for the PAT file.
 		pat, err := waitForPAT(patPath)
 		if err != nil {
 			fmt.Printf("❌ PAT not found: %v\n", err)
@@ -1681,13 +1786,16 @@ func main() {
 			os.Exit(1)
 		}
 		accessToken = pat
+		patFromFile = true
 		fmt.Println("✅ Using PAT from file")
 	}
 
-	// Wait for Zitadel gRPC to be ready before connecting (via Docker alias)
-	if err := waitForZitadelReady(internalAddr); err != nil {
-		fmt.Printf("❌ Zitadel not ready: %v\n", err)
-		os.Exit(1)
+	// Wait for Zitadel gRPC to be ready (may already be done in K8s path above).
+	if !isRunningInKubernetes() {
+		if err := waitForZitadelReady(internalAddr); err != nil {
+			fmt.Printf("❌ Zitadel not ready: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Create client - domain sets the gRPC :authority header to match Zitadel's ExternalDomain
@@ -1812,14 +1920,34 @@ func main() {
 
 	// Write credentials — K8s: patch the Secret directly; Docker Compose: write .env.
 	if isRunningInKubernetes() {
-		k8s, err := newK8sClient()
-		if err != nil {
-			fmt.Printf("❌ Failed to create Kubernetes client: %v\n", err)
-			os.Exit(1)
+		if k8s == nil {
+			var k8sErr error
+			k8s, k8sErr = newK8sClient()
+			if k8sErr != nil {
+				fmt.Printf("❌ Failed to create Kubernetes client: %v\n", k8sErr)
+				os.Exit(1)
+			}
 		}
 		if err := writeKubernetesSecretFromEnv(k8s, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey); err != nil {
 			fmt.Printf("❌ Failed to patch Kubernetes secret: %v\n", err)
 			os.Exit(1)
+		}
+		// Persist the admin PAT so future pod restarts can skip the file wait.
+		// This is only needed when we read the PAT from the emptyDir file (first boot).
+		if patFromFile {
+			adminPATKey := envOrDefault("K8S_KEY_ADMIN_PAT", "admin-pat")
+			secretName := os.Getenv("K8S_SECRET_NAME")
+			namespace := os.Getenv("K8S_NAMESPACE")
+			if namespace == "" {
+				if b, readErr := os.ReadFile(k8sNamespacePath); readErr == nil {
+					namespace = strings.TrimSpace(string(b))
+				}
+			}
+			if err := k8s.patchSecret(secretName, namespace, map[string]string{adminPATKey: accessToken}); err != nil {
+				fmt.Printf("⚠️  Warning: could not store admin PAT in K8s Secret: %v\n", err)
+			} else {
+				fmt.Println("✅ Stored admin PAT in K8s Secret for future pod restarts")
+			}
 		}
 		fmt.Println()
 		fmt.Println("--- Restarting Zitadel consumers ---")
