@@ -59,6 +59,8 @@ type ZitadelClient struct {
 	mgmtService        management.ManagementServiceClient
 	actionService      actionV2.ActionServiceClient
 	featureService     featureV2.FeatureServiceClient
+	internalAddr       string // host:port for HTTP calls (e.g. "localhost:8080")
+	domain             string // ExternalDomain for Host header (e.g. "sw-auth.example.com")
 	orgID              string
 }
 
@@ -107,6 +109,8 @@ func NewZitadelClient(accessToken, dialAddr, domain string) (*ZitadelClient, err
 		mgmtService:        api.ManagementService(),
 		actionService:      api.ActionServiceV2(),
 		featureService:     api.FeatureServiceV2(),
+		internalAddr:       dialAddr,
+		domain:             domain,
 	}, nil
 }
 
@@ -263,13 +267,8 @@ func (c *ZitadelClient) GetOrCreateFrontendApp(orgID, projectID string, extraRed
 	}
 
 	appID := createResp.GetApplicationId()
-	
-	// Wait for database projection to complete
-	// OAuth endpoint needs the app to be fully projected before it can be found
-	fmt.Printf("⏳ Waiting for app projection to complete...\n")
-	time.Sleep(5 * time.Second)
-	
-	// Get the app to retrieve ClientId
+
+	// Get the app to retrieve ClientId (V2 API reads from event store, works immediately)
 	getResp, err := c.applicationService.GetApplication(c.ctx, &applicationV2.GetApplicationRequest{
 		ApplicationId: appID,
 	})
@@ -294,8 +293,63 @@ func (c *ZitadelClient) GetOrCreateFrontendApp(orgID, projectID string, extraRed
 	} else {
 		fmt.Printf("✅ Created frontend app: %s (ClientId: %s)\n", appID, clientID)
 	}
-	
+
+	// Wait for the OIDC projection to index the new client before returning.
+	// Consumer pods must not be restarted until this is ready, otherwise they'll
+	// get Errors.App.NotFound for up to 20+ minutes on a fresh install.
+	c.waitForOIDCProjection(clientID, 5*time.Minute)
+
 	return clientID, nil
+}
+
+// waitForOIDCProjection polls Zitadel's OIDC authorize endpoint until the given clientID
+// is resolvable (i.e. the projection has processed the app creation event).
+// On a fresh install, Zitadel's projection workers may take minutes to catch up with the
+// event backlog from initial setup. Without this wait, consumer pods restart with a valid
+// client ID but Zitadel returns Errors.App.NotFound until the projection is ready.
+func (c *ZitadelClient) waitForOIDCProjection(clientID string, timeout time.Duration) {
+	fmt.Printf("⏳ Waiting for OIDC projection to index client %s...\n", clientID)
+	deadline := time.Now().Add(timeout)
+
+	httpClient := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Don't follow redirects — a 302 means the client was found
+			return http.ErrUseLastResponse
+		},
+	}
+
+	authorizeURL := fmt.Sprintf("http://%s/oauth/v2/authorize?client_id=%s&redirect_uri=http://localhost/probe&response_type=code&scope=openid&code_challenge=probe&code_challenge_method=S256",
+		c.internalAddr, clientID)
+
+	for time.Now().Before(deadline) {
+		req, err := http.NewRequest(http.MethodGet, authorizeURL, nil)
+		if err != nil {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		// Set Host header to match ExternalDomain so Zitadel resolves the instance
+		req.Host = c.domain
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		resp.Body.Close()
+
+		// 302 = client found (redirect to login), projection is ready
+		// 400 = Errors.App.NotFound, projection hasn't caught up yet
+		if resp.StatusCode == http.StatusFound {
+			fmt.Printf("✅ OIDC projection ready (client resolvable)\n")
+			return
+		}
+
+		fmt.Printf("   Projection not ready yet (status=%d), retrying...\n", resp.StatusCode)
+		time.Sleep(3 * time.Second)
+	}
+
+	fmt.Printf("⚠️  Timed out waiting for OIDC projection after %v — proceeding anyway\n", timeout)
 }
 
 // EnsureLoginV2BaseURI sets the Login V2 BaseURI on the Zitadel instance via the Feature API.
