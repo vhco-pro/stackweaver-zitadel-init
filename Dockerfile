@@ -13,7 +13,7 @@ COPY main.go .
 RUN CGO_ENABLED=0 GOOS=linux go build -o zitadel-init main.go
 
 FROM alpine:latest
-RUN apk add --no-cache ca-certificates
+RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
 COPY --from=builder /build/zitadel-init /zitadel-init
 ENTRYPOINT ["/zitadel-init"]
 
