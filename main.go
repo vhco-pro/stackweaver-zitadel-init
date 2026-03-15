@@ -337,12 +337,20 @@ func (c *ZitadelClient) waitForOIDCProjection(clientID string, timeout time.Dura
 			time.Sleep(pollInterval)
 			continue
 		}
+		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
-		// 302 = client found (redirect to login), projection is ready
-		// 400 = Errors.App.NotFound, projection hasn't caught up yet
+		// 302 = client found, Zitadel redirected to login UI — projection ready.
+		// 400 with Errors.App.NotFound = projection hasn't indexed the client yet.
+		// 400 with any other reason (e.g. redirect_uri not registered) = client IS
+		//   found by the projection; the probe's dummy redirect_uri was rejected after
+		//   the client lookup succeeded. Treat this as ready too.
 		if resp.StatusCode == http.StatusFound {
-			fmt.Printf("✅ OIDC projection ready (client resolvable)\n")
+			fmt.Printf("✅ OIDC projection ready (client resolvable, got 302)\n")
+			return
+		}
+		if resp.StatusCode == http.StatusBadRequest && !strings.Contains(string(body), "App.NotFound") {
+			fmt.Printf("✅ OIDC projection ready (client resolvable, got 400 on redirect_uri validation)\n")
 			return
 		}
 
