@@ -691,6 +691,7 @@ func (c *ZitadelClient) EnsureLoginServiceUser() (string, string, error) {
 		return "", "", err
 	}
 
+	isNewUser := false
 	if userID == "" {
 		orgID := c.orgID
 		if orgID == "" {
@@ -700,6 +701,7 @@ func (c *ZitadelClient) EnsureLoginServiceUser() (string, string, error) {
 		if err != nil {
 			return "", "", err
 		}
+		isNewUser = true
 		fmt.Printf("✅ Created login service user: %s\n", userID)
 	} else {
 		fmt.Printf("✅ Login service user already exists: %s\n", userID)
@@ -709,12 +711,18 @@ func (c *ZitadelClient) EnsureLoginServiceUser() (string, string, error) {
 		return "", "", err
 	}
 
-	token, err := c.createLoginServicePAT(userID)
-	if err != nil {
-		return "", "", err
+	// Only create a new PAT for newly created users. For existing users, return
+	// empty string — the caller (writeKubernetesSecretFromEnv / writeConfigFiles)
+	// will preserve the existing token from the K8s Secret or .env file.
+	if isNewUser {
+		token, err := c.createLoginServicePAT(userID)
+		if err != nil {
+			return "", "", err
+		}
+		return userID, token, nil
 	}
 
-	return userID, token, nil
+	return userID, "", nil
 }
 
 // findProviderByName searches for an existing IdP provider by name.
@@ -1455,43 +1463,51 @@ func newK8sClient() (*k8sClient, error) {
 	}, nil
 }
 
-// readSecretKey reads a single key from a Kubernetes Secret.
-// Returns the decoded value, or empty string if the key is missing or empty.
-func (k *k8sClient) readSecretKey(secretName, namespace, key string) (string, error) {
+// readAllSecretKeys reads all keys from a Kubernetes Secret and returns them as
+// a decoded map. Returns an empty map (not nil) on any error or if the secret
+// has no data, so callers can safely index without nil checks.
+func (k *k8sClient) readAllSecretKeys(secretName, namespace string) map[string]string {
 	url := fmt.Sprintf("%s/api/v1/namespaces/%s/secrets/%s", k.apiBase, namespace, secretName)
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("build request: %w", err)
+		return map[string]string{}
 	}
 	req.Header.Set("Authorization", "Bearer "+k.token)
 
 	resp, err := k.http.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("get secret: %w", err)
+		return map[string]string{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("get secret returned HTTP %d", resp.StatusCode)
+		return map[string]string{}
 	}
 
 	var secret struct {
 		Data map[string]string `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&secret); err != nil {
-		return "", fmt.Errorf("decode secret: %w", err)
+		return map[string]string{}
 	}
 
-	encoded, ok := secret.Data[key]
-	if !ok || encoded == "" {
-		return "", nil
+	result := make(map[string]string, len(secret.Data))
+	for k, v := range secret.Data {
+		decoded, err := base64.StdEncoding.DecodeString(v)
+		if err == nil {
+			result[k] = strings.TrimSpace(string(decoded))
+		}
 	}
+	return result
+}
 
-	// K8s secret .data values are base64-encoded
-	decoded, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("decode base64 value for key %q: %w", key, err)
+// readSecretKey reads a single key from a Kubernetes Secret.
+// Returns the decoded value, or empty string if the key is missing or empty.
+func (k *k8sClient) readSecretKey(secretName, namespace, key string) (string, error) {
+	all := k.readAllSecretKeys(secretName, namespace)
+	if v, ok := all[key]; ok && v != "" {
+		return v, nil
 	}
-	return strings.TrimSpace(string(decoded)), nil
+	return "", nil
 }
 
 // patchSecret patches the named Secret with stringData.
@@ -1610,8 +1626,26 @@ func (k *k8sClient) restartDeployment(deploymentName, namespace, zitadelSecretNa
 	return nil
 }
 
+// preserveExisting returns newValue if non-empty, otherwise falls back to the
+// existing value from the K8s Secret. This prevents overwriting valid credentials
+// with empty strings when Zitadel doesn't return the value on GET (e.g.
+// client-secret and webhook signing keys are only returned on first creation).
+func preserveExisting(newValue string, existing map[string]string, key string) string {
+	if newValue != "" {
+		return newValue
+	}
+	if v, ok := existing[key]; ok && v != "" {
+		fmt.Printf("  ℹ️  Preserving existing %q from K8s Secret (not returned by Zitadel on re-run)\n", key)
+		return v
+	}
+	return newValue
+}
+
 // writeKubernetesSecretFromEnv reads K8S_* env vars and patches the Zitadel
-// Secret with the generated credentials.
+// Secret with the generated credentials. When Zitadel returns an empty value
+// for a key (e.g. client-secret on an existing app), the existing value in the
+// K8s Secret is preserved — mirroring the Docker Compose path which reads the
+// existing .env before writing (see writeConfigFiles).
 func writeKubernetesSecretFromEnv(k *k8sClient, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey string) error {
 	secretName := os.Getenv("K8S_SECRET_NAME")
 	namespace := os.Getenv("K8S_NAMESPACE")
@@ -1632,13 +1666,18 @@ func writeKubernetesSecretFromEnv(k *k8sClient, frontendClientID, apiClientID, a
 	keyIdpSyncKey := envOrDefault("K8S_KEY_WEBHOOK_IDP_SYNC_KEY", "webhook-idp-sync-key")
 	keyComplementTokenKey := envOrDefault("K8S_KEY_WEBHOOK_COMPLEMENT_TOKEN_KEY", "webhook-complement-token-key")
 
+	// Read existing secret values so we can preserve them when Zitadel doesn't
+	// return the value (client-secret and webhook signing keys are only returned
+	// on first creation, not on subsequent Get calls).
+	existing := k.readAllSecretKeys(secretName, namespace)
+
 	data := map[string]string{
 		keyClientID:           apiClientID,
-		keyClientSecret:       apiClientSecret,
-		keyLoginToken:         loginServiceToken,
+		keyClientSecret:       preserveExisting(apiClientSecret, existing, keyClientSecret),
+		keyLoginToken:         preserveExisting(loginServiceToken, existing, keyLoginToken),
 		keyFrontendClientID:   frontendClientID,
-		keyIdpSyncKey:         idpSyncKey,
-		keyComplementTokenKey: complementTokenKey,
+		keyIdpSyncKey:         preserveExisting(idpSyncKey, existing, keyIdpSyncKey),
+		keyComplementTokenKey: preserveExisting(complementTokenKey, existing, keyComplementTokenKey),
 	}
 
 	if err := k.patchSecret(secretName, namespace, data); err != nil {
@@ -1683,12 +1722,19 @@ func writeConfigFiles(projectRoot, frontendClientID, apiClientID, apiClientSecre
 		return fmt.Errorf("failed to create deploy dir: %w", err)
 	}
 
-	// If signing keys are empty (target already existed, no rotation),
-	// preserve existing keys from the current .env file.
-	if idpSyncKey == "" || complementTokenKey == "" {
+	// If any derived values are empty (Zitadel doesn't return them on GET for
+	// existing objects), preserve existing values from the current .env file.
+	// This mirrors the K8s path's preserveExisting() logic.
+	if apiClientSecret == "" || loginServiceToken == "" || idpSyncKey == "" || complementTokenKey == "" {
 		existingEnv, _ := os.ReadFile(deployEnvPath)
 		if existingEnv != nil {
 			for _, line := range strings.Split(string(existingEnv), "\n") {
+				if apiClientSecret == "" && strings.HasPrefix(line, "ZITADEL_API_CLIENT_SECRET=") {
+					apiClientSecret = strings.TrimPrefix(line, "ZITADEL_API_CLIENT_SECRET=")
+				}
+				if loginServiceToken == "" && strings.HasPrefix(line, "ZITADEL_LOGIN_SERVICE_USER_TOKEN=") {
+					loginServiceToken = strings.TrimPrefix(line, "ZITADEL_LOGIN_SERVICE_USER_TOKEN=")
+				}
 				if idpSyncKey == "" && strings.HasPrefix(line, "ZITADEL_WEBHOOK_IDP_SYNC_KEY=") {
 					idpSyncKey = strings.TrimPrefix(line, "ZITADEL_WEBHOOK_IDP_SYNC_KEY=")
 				}
@@ -1772,11 +1818,11 @@ func main() {
 	// emptyDir is empty and the PAT file never appears. To handle this:
 	//
 	//   1. ZITADEL_PAT env var (highest priority, always works)
-	//   2. PAT file from emptyDir (first boot — Zitadel writes it)
-	//   3. K8s Secret fallback (pod restart — stored by a previous init run)
+	//   2. K8s Secret (fastest — check before waiting for file)
+	//   3. PAT file from emptyDir (first boot — Zitadel writes it)
 	//
 	// After a successful file-based read, the PAT is also persisted into the
-	// K8s Secret so future pod restarts can use source (3).
+	// K8s Secret so future pod restarts can use source (2).
 	var accessToken string
 	var k8s *k8sClient       // lazily created, reused later for secret writes
 	var patFromFile bool      // track source so we know whether to store it
@@ -1785,50 +1831,50 @@ func main() {
 		accessToken = patFromEnv
 		fmt.Println("✅ Using PAT from environment variable")
 	} else if isRunningInKubernetes() {
-		// K8s sidecar mode: wait for Zitadel first (the PAT file is written
-		// before Zitadel starts serving, so it should exist by readiness).
+		// K8s sidecar mode: wait for Zitadel first.
 		if err := waitForZitadelReady(internalAddr); err != nil {
 			fmt.Printf("❌ Zitadel not ready: %v\n", err)
 			os.Exit(1)
 		}
 
-		// Short grace period for the PAT file (on first boot it's already
-		// there; on restarts it will never appear, so don't waste 5 minutes).
-		pat, err := waitForPATWithTimeout(patPath, 30*time.Second)
-		if err == nil {
+		// Check K8s Secret FIRST — on pod restarts with existing DB, this is
+		// instant and avoids wasting 30s waiting for a PAT file that will never
+		// appear (Zitadel only writes it during FirstInstance).
+		var k8sErr error
+		k8s, k8sErr = newK8sClient()
+		if k8sErr != nil {
+			fmt.Printf("❌ Failed to create K8s client: %v\n", k8sErr)
+			os.Exit(1)
+		}
+		secretName := os.Getenv("K8S_SECRET_NAME")
+		namespace := os.Getenv("K8S_NAMESPACE")
+		if namespace == "" {
+			if b, readErr := os.ReadFile(k8sNamespacePath); readErr == nil {
+				namespace = strings.TrimSpace(string(b))
+			}
+		}
+		adminPATKey := envOrDefault("K8S_KEY_ADMIN_PAT", "admin-pat")
+		storedPAT, _ := k8s.readSecretKey(secretName, namespace, adminPATKey)
+
+		if storedPAT != "" {
+			accessToken = storedPAT
+			fmt.Println("✅ Using admin PAT from K8s Secret")
+		} else {
+			// No PAT in secret — this is either a first install (PAT file will
+			// appear during FirstInstance) or the secret was never populated.
+			// Wait for the PAT file with a generous timeout.
+			fmt.Println("ℹ️  No admin PAT in K8s Secret, waiting for PAT file (first boot)...")
+			pat, err := waitForPATWithTimeout(patPath, 5*time.Minute)
+			if err != nil {
+				fmt.Println("❌ No admin PAT found — neither in K8s Secret nor PAT file")
+				fmt.Println("   This usually means the first install did not complete successfully.")
+				fmt.Println("   To recover: delete both the Zitadel PostgreSQL PVC and the Zitadel")
+				fmt.Println("   secret, then reinstall to allow a clean first-time initialization.")
+				os.Exit(1)
+			}
 			accessToken = pat
 			patFromFile = true
-			fmt.Println("✅ Using PAT from file")
-		} else {
-			// Fallback: read admin PAT from K8s Secret (stored by a previous run).
-			fmt.Println("⚠️  PAT file not found, trying K8s Secret fallback...")
-			var k8sErr error
-			k8s, k8sErr = newK8sClient()
-			if k8sErr != nil {
-				fmt.Printf("❌ Failed to create K8s client: %v\n", k8sErr)
-				os.Exit(1)
-			}
-			secretName := os.Getenv("K8S_SECRET_NAME")
-			namespace := os.Getenv("K8S_NAMESPACE")
-			if namespace == "" {
-				if b, readErr := os.ReadFile(k8sNamespacePath); readErr == nil {
-					namespace = strings.TrimSpace(string(b))
-				}
-			}
-			adminPATKey := envOrDefault("K8S_KEY_ADMIN_PAT", "admin-pat")
-			storedPAT, readErr := k8s.readSecretKey(secretName, namespace, adminPATKey)
-			if readErr != nil {
-				fmt.Printf("❌ Failed to read admin PAT from K8s Secret: %v\n", readErr)
-				os.Exit(1)
-			}
-			if storedPAT == "" {
-				fmt.Println("❌ No admin PAT found in K8s Secret (first install may not have completed)")
-				fmt.Println("   If this is a reinstall with an existing database, delete the postgresql PVC")
-				fmt.Println("   and the zitadel secret to allow a clean first-time initialization.")
-				os.Exit(1)
-			}
-			accessToken = storedPAT
-			fmt.Println("✅ Using admin PAT from K8s Secret (stored by previous init run)")
+			fmt.Println("✅ Using PAT from file (first boot)")
 		}
 	} else {
 		// Docker Compose mode: wait the full duration for the PAT file.
