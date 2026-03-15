@@ -35,7 +35,9 @@ import (
 	userV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user/v2"
 	zitadelpkg "github.com/zitadel/zitadel-go/v3/pkg/zitadel"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -294,11 +296,6 @@ func (c *ZitadelClient) GetOrCreateFrontendApp(orgID, projectID string, extraRed
 		fmt.Printf("✅ Created frontend app: %s (ClientId: %s)\n", appID, clientID)
 	}
 
-	// Wait for the OIDC projection to index the new client before returning.
-	// Consumer pods must not be restarted until this is ready, otherwise they'll
-	// get Errors.App.NotFound for up to 20+ minutes on a fresh install.
-	c.waitForOIDCProjection(clientID, 5*time.Minute)
-
 	return clientID, nil
 }
 
@@ -308,7 +305,7 @@ func (c *ZitadelClient) GetOrCreateFrontendApp(orgID, projectID string, extraRed
 // event backlog from initial setup. Without this wait, consumer pods restart with a valid
 // client ID but Zitadel returns Errors.App.NotFound until the projection is ready.
 func (c *ZitadelClient) waitForOIDCProjection(clientID string, timeout time.Duration) {
-	fmt.Printf("⏳ Waiting for OIDC projection to index client %s...\n", clientID)
+	fmt.Printf("⏳ Waiting for OIDC projection to index client %s (timeout %v)...\n", clientID, timeout)
 	deadline := time.Now().Add(timeout)
 
 	httpClient := &http.Client{
@@ -322,10 +319,14 @@ func (c *ZitadelClient) waitForOIDCProjection(clientID string, timeout time.Dura
 	authorizeURL := fmt.Sprintf("http://%s/oauth/v2/authorize?client_id=%s&redirect_uri=http://localhost/probe&response_type=code&scope=openid&code_challenge=probe&code_challenge_method=S256",
 		c.internalAddr, clientID)
 
+	const pollInterval = 3 * time.Second
+	const logInterval = 30 * time.Second
+	lastLog := time.Now()
+
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequest(http.MethodGet, authorizeURL, nil)
 		if err != nil {
-			time.Sleep(3 * time.Second)
+			time.Sleep(pollInterval)
 			continue
 		}
 		// Set Host header to match ExternalDomain so Zitadel resolves the instance
@@ -333,7 +334,7 @@ func (c *ZitadelClient) waitForOIDCProjection(clientID string, timeout time.Dura
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			time.Sleep(3 * time.Second)
+			time.Sleep(pollInterval)
 			continue
 		}
 		resp.Body.Close()
@@ -345,8 +346,12 @@ func (c *ZitadelClient) waitForOIDCProjection(clientID string, timeout time.Dura
 			return
 		}
 
-		fmt.Printf("   Projection not ready yet (status=%d), retrying...\n", resp.StatusCode)
-		time.Sleep(3 * time.Second)
+		if time.Since(lastLog) >= logInterval {
+			elapsed := time.Since(deadline.Add(-timeout)).Round(time.Second)
+			fmt.Printf("   Still waiting for OIDC projection (%v elapsed, status=%d)...\n", elapsed, resp.StatusCode)
+			lastLog = time.Now()
+		}
+		time.Sleep(pollInterval)
 	}
 
 	fmt.Printf("⚠️  Timed out waiting for OIDC projection after %v — proceeding anyway\n", timeout)
@@ -1787,6 +1792,33 @@ ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=%s
 	return nil
 }
 
+// validateStoredPAT checks whether a PAT from the K8s secret is still valid
+// against the live Zitadel instance. Returns false only on a definitive auth
+// rejection (Unauthenticated / PermissionDenied) so the caller can fall through
+// to the PAT file wait. Network errors or timeouts are treated as "assume valid"
+// to avoid breaking normal pod restarts on a slow cluster.
+func validateStoredPAT(accessToken, dialAddr, domain string) bool {
+	c, err := NewZitadelClient(accessToken, dialAddr, domain)
+	if err != nil {
+		fmt.Printf("⚠️  Could not build client to validate stored PAT (%v), assuming valid\n", err)
+		return true
+	}
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	_, err = c.userService.ListUsers(ctx, &userV2.ListUsersRequest{
+		Query: &objectV2.ListQuery{Limit: 1},
+	})
+	if err != nil {
+		code := status.Code(err)
+		if code == codes.Unauthenticated || code == codes.PermissionDenied {
+			fmt.Printf("⚠️  Stored admin PAT is no longer valid (gRPC %s) — falling through to PAT file\n", code)
+			return false
+		}
+		fmt.Printf("⚠️  Could not validate stored PAT (%v), assuming valid\n", err)
+	}
+	return true
+}
+
 func main() {
 	patPath := os.Getenv("ZITADEL_PAT_PATH")
 	if patPath == "" {
@@ -1857,8 +1889,26 @@ func main() {
 		storedPAT, _ := k8s.readSecretKey(secretName, namespace, adminPATKey)
 
 		if storedPAT != "" {
-			accessToken = storedPAT
-			fmt.Println("✅ Using admin PAT from K8s Secret")
+			fmt.Println("ℹ️  Validating stored admin PAT...")
+			if validateStoredPAT(storedPAT, internalAddr, domain) {
+				accessToken = storedPAT
+				fmt.Println("✅ Using admin PAT from K8s Secret")
+			} else {
+				// Stored PAT is stale — the Zitadel DB was wiped (e.g. PVC deleted)
+				// but the secret was kept. Fall through to the PAT file written by
+				// Zitadel's FirstInstance bootstrap on the fresh DB.
+				fmt.Println("ℹ️  Stored PAT is stale, waiting for PAT file (fresh DB)...")
+				pat, err := waitForPATWithTimeout(patPath, 5*time.Minute)
+				if err != nil {
+					fmt.Println("❌ Stored PAT was stale and no PAT file appeared.")
+					fmt.Println("   The Zitadel DB was likely wiped but the secret was not deleted.")
+					fmt.Println("   To recover: delete the Zitadel secret, then reinstall.")
+					os.Exit(1)
+				}
+				accessToken = pat
+				patFromFile = true
+				fmt.Println("✅ Using PAT from file (fresh DB after wipe)")
+			}
 		} else {
 			// No PAT in secret — this is either a first install (PAT file will
 			// appear during FirstInstance) or the secret was never populated.
@@ -2049,6 +2099,18 @@ func main() {
 				fmt.Println("✅ Stored admin PAT in K8s Secret for future pod restarts")
 			}
 		}
+
+		// Wait for the OIDC projection to be ready before restarting consumers.
+		// Consumers must not restart until Zitadel can resolve the client ID on
+		// the /oauth/v2/authorize endpoint — otherwise the frontend gets
+		// Errors.App.NotFound until the projection catches up (up to 20+ min on
+		// a cold or resource-constrained cluster).
+		// This runs after ALL setup so time spent on app/user creation counts
+		// toward the projection warming up. 30 minutes covers the worst observed
+		// lag (~23 min). On re-runs with an existing DB projections are already
+		// populated and this returns within a few seconds.
+		client.waitForOIDCProjection(frontendClientID, 30*time.Minute)
+
 		fmt.Println()
 		fmt.Println("--- Restarting Zitadel consumers ---")
 		restartZitadelConsumers(k8s)
