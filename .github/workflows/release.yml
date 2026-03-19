@@ -8,7 +8,7 @@ on:
       - '*.*.*'
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -32,29 +32,7 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/vhco-pro/stackweaver-zitadel-init:buildcache,mode=max
           trivy-exit-code: '1'
 
-  # bump-helm:
-  #   needs: release
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout monorepo
-  #       uses: actions/checkout@v6
-  #       with:
-  #         repository: michielvha/stackweaver
-  #         token: ${{ secrets.RELEASE_TOKEN }}
-  #
-  #     - name: Update image tag in values.yaml
-  #       run: |
-  #         yq -i '.zitadel.init.image.tag = "${{ github.ref_name }}"' deploy/helm/stackweaver/values.yaml
-  #
-  #     - name: Commit and push
-  #       run: |
-  #         git config user.name "michielvha"
-  #         git config user.email "michielvh@outlook.com"
-  #         git add -A
-  #         if git diff --staged --quiet; then
-  #           echo "No changes to commit"
-  #         else
-  #           git commit -m "fix(zitadel-init): bump zitadel-init image to ${{ github.ref_name }}"
-  #           git pull --rebase origin main
-  #           git push
-  #         fi
+      - name: Changelog & GitHub Release
+        uses: michielvha/changelog-release-action@main
+        with:
+          version: ${{ github.ref_name }}
