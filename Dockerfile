@@ -8,9 +8,10 @@ RUN go mod download
 
 # Copy source code
 COPY main.go .
+COPY internal/ internal/
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o zitadel-init main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o zitadel-init .
 
 FROM alpine:latest
 RUN apk upgrade --no-cache && apk add --no-cache ca-certificates
