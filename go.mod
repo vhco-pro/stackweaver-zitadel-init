@@ -1,6 +1,6 @@
-module github.com/iac-platform/zitadel-init
+module github.com/michielvha/stackweaver/scripts/zitadel-init
 
-go 1.25.7
+go 1.26
 
 require (
 	github.com/zitadel/zitadel-go/v3 v3.19.0

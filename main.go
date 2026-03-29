@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iac-platform/zitadel-init/internal/config"
-	"github.com/iac-platform/zitadel-init/internal/k8s"
-	"github.com/iac-platform/zitadel-init/internal/output"
-	"github.com/iac-platform/zitadel-init/internal/zitadel"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/config"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/k8s"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/output"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/zitadel"
 )
 
 func main() {
