@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/iac-platform/zitadel-init/internal/config"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/config"
 )
 
 // WriteComposeEnv writes the Docker Compose deploy/.env file with all generated credentials.

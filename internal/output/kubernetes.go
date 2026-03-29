@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/iac-platform/zitadel-init/internal/config"
-	"github.com/iac-platform/zitadel-init/internal/k8s"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/config"
+	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/k8s"
 )
 
 // preserveExisting returns newValue if non-empty, otherwise falls back to the
