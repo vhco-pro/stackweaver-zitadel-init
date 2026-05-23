@@ -101,13 +101,15 @@ func (k *Client) RestartDeployment(deploymentName, namespace, zitadelSecretName 
 	return nil
 }
 
-// RestartConsumers restarts the API, frontend, and login-ui deployments
+// RestartConsumers restarts the API and frontend deployments
 // (skipping any that aren't found or that Reloader already watches).
+// The login-ui container was removed in favor of the in-frontend custom login UI;
+// its env var is no longer emitted by the chart.
 func RestartConsumers(k *Client) {
 	secretName := os.Getenv("K8S_SECRET_NAME")
 	namespace := os.Getenv("K8S_NAMESPACE")
 
-	for _, envVar := range []string{"K8S_API_DEPLOYMENT", "K8S_FRONTEND_DEPLOYMENT", "K8S_LOGIN_UI_DEPLOYMENT"} {
+	for _, envVar := range []string{"K8S_API_DEPLOYMENT", "K8S_FRONTEND_DEPLOYMENT"} {
 		name := os.Getenv(envVar)
 		if name == "" {
 			continue

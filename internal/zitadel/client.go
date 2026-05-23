@@ -10,6 +10,7 @@ import (
 
 	"github.com/zitadel/zitadel-go/v3/pkg/client"
 	actionV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/action/v2"
+	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/admin"
 	applicationV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/application/v2"
 	featureV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/feature/v2"
 	internalpermission "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/internal_permission/v2"
@@ -37,6 +38,7 @@ type Client struct {
 	userService        userV2.UserServiceClient
 	internalPermission internalpermission.InternalPermissionServiceClient
 	mgmtService        management.ManagementServiceClient
+	adminService       admin.AdminServiceClient
 	actionService      actionV2.ActionServiceClient
 	featureService     featureV2.FeatureServiceClient
 	internalAddr       string // host:port for HTTP calls (e.g. "localhost:8080")
@@ -88,6 +90,7 @@ func NewClient(accessToken, dialAddr, domain string) (*Client, error) {
 		userService:        api.UserServiceV2(),
 		internalPermission: api.InternalPermissionServiceV2(),
 		mgmtService:        api.ManagementService(),
+		adminService:       api.AdminService(),
 		actionService:      api.ActionServiceV2(),
 		featureService:     api.FeatureServiceV2(),
 		internalAddr:       dialAddr,

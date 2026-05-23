@@ -204,14 +204,18 @@ func main() {
 	}
 	fmt.Printf("✅ Login service user ready: %s\n", loginUserID)
 
-	// Ensure the Login V2 BaseURI points to the public login-ui URL.
-	// The ConfigMap's DefaultInstance.Features.LoginV2.BaseURI only applies on first Zitadel init
-	// and uses the internal service name (not browser-reachable). This call updates the database
-	// via the Feature API on every zitadel-init run, so the URL stays correct after domain changes.
-	if loginUIBaseURL := os.Getenv("LOGIN_UI_BASE_URL"); loginUIBaseURL != "" {
-		if err := client.EnsureLoginV2BaseURI(loginUIBaseURL); err != nil {
-			fmt.Printf("⚠️  Warning: could not set Login V2 BaseURI: %v\n", err)
-		}
+	// Ensure the Login V2 BaseURI points to the Stackweaver SPA /login routes.
+	// The ConfigMap's DefaultInstance.Features.LoginV2.BaseURI in zitadel-defaults.yaml
+	// only applies on first Zitadel init and uses the internal service name (not
+	// browser-reachable). This call updates the database via the Feature API on every
+	// zitadel-init run, so the URL stays correct after domain changes. Defaults to the
+	// local compose frontend at localhost:5173/login; Helm overrides via LOGIN_UI_BASE_URL.
+	loginUIBaseURL := os.Getenv("LOGIN_UI_BASE_URL")
+	if loginUIBaseURL == "" {
+		loginUIBaseURL = "http://localhost:5173/login"
+	}
+	if err := client.EnsureLoginV2BaseURI(loginUIBaseURL); err != nil {
+		fmt.Printf("⚠️  Warning: could not set Login V2 BaseURI: %v\n", err)
 	}
 
 	// Ensure trusted + custom domains so Zitadel is reachable on both ExternalDomain and localhost.

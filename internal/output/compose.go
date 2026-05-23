@@ -48,11 +48,11 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 	issuerURL := config.ComputeIssuerURL(zitadelDefaults)
 	fmt.Printf("ℹ️  Derived issuer URL from zitadel-defaults.yaml: %s\n", issuerURL)
 
-	// Derive external host for login-ui IdP callback header.
-	// When ExternalDomain is a custom domain (not localhost), the login-ui must
-	// send x-zitadel-instance-host so Zitadel constructs IdP callback URLs
-	// using the external domain (e.g. https://zitadel.example.com/idps/callback)
-	// instead of https://localhost:8080/idps/callback.
+	// Derive external host for the auth-proxy's x-zitadel-instance-host forward.
+	// When ExternalDomain is a custom domain (not localhost), the api container
+	// forwards this header so Zitadel constructs IdP callback URLs using the
+	// external domain (e.g. https://zitadel.example.com/idps/callback) instead
+	// of https://localhost:8080/idps/callback.
 	externalHost := ""
 	if zitadelDefaults.ExternalDomain != "localhost" {
 		externalHost = zitadelDefaults.ExternalDomain
@@ -78,7 +78,7 @@ ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=%s
 	// NOTE: Only deploy/.env is written - this is the single source of truth
 	// All docker-compose services use env_file: - ./.env which reads from deploy/.env
 	// docker-compose.yml uses ${ZITADEL_ISSUER:-http://localhost:8080} substitution
-	// so the issuer URL is automatically propagated to API, frontend, and login-ui.
+	// so the issuer URL is automatically propagated to API and frontend.
 	// On first run (no .env yet), the fallback http://localhost:8080 is used.
 	// After init completes, restart services to pick up the correct issuer.
 
