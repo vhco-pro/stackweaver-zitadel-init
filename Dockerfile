@@ -10,7 +10,7 @@ COPY internal/ internal/
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o zitadel-init .
 
-# Runtime stage — distroless eliminates all OS-level CVEs
+# Runtime stage, distroless eliminates all OS-level CVEs
 # Uses nonroot variant for security; docker-compose overrides to host UID for volume writes
 FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
 

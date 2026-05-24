@@ -22,7 +22,7 @@ func (c *Client) WaitForOIDCProjection(clientID string, timeout time.Duration) {
 	httpClient := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Don't follow redirects — a 302 means the client was found
+			// Don't follow redirects, a 302 means the client was found
 			return http.ErrUseLastResponse
 		},
 	}
@@ -51,7 +51,7 @@ func (c *Client) WaitForOIDCProjection(clientID string, timeout time.Duration) {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
-		// 302 = client found, Zitadel redirected to login UI — projection ready.
+		// 302 = client found, Zitadel redirected to login UI, projection ready.
 		// 400 with Errors.App.NotFound = projection hasn't indexed the client yet.
 		// 400 with any other reason (e.g. redirect_uri not registered) = client IS
 		//   found by the projection; the probe's dummy redirect_uri was rejected after
@@ -73,5 +73,5 @@ func (c *Client) WaitForOIDCProjection(clientID string, timeout time.Duration) {
 		time.Sleep(pollInterval)
 	}
 
-	fmt.Printf("⚠️  Timed out waiting for OIDC projection after %v — proceeding anyway\n", timeout)
+	fmt.Printf("⚠️  Timed out waiting for OIDC projection after %v, proceeding anyway\n", timeout)
 }

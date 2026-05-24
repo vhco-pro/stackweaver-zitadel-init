@@ -38,12 +38,12 @@ func (c *Client) getOrCreateTarget(name, endpoint string) (string, string, error
 	timeout := durationpb.New(10 * time.Second)
 
 	if existingID != "" {
-		// Target already exists — do NOT update it to avoid rotating the signing key.
+		// Target already exists, do NOT update it to avoid rotating the signing key.
 		// Key rotation causes a race condition: docker compose reads .env before
 		// zitadel-init runs, so the API container gets stale keys.
 		// The endpoint URL is stable, so there's no need to update.
 		fmt.Printf("✅ Using existing target '%s': %s\n", name, existingID)
-		// Return empty signing key — caller will preserve existing key from .env
+		// Return empty signing key, caller will preserve existing key from .env
 		return existingID, "", nil
 	}
 
@@ -81,7 +81,7 @@ func (c *Client) setExecution(condition *actionV2.Condition, targetID string) er
 }
 
 // cleanupActionsV1 removes any legacy Actions V1 actions and triggers.
-// This is needed when migrating from V1 to V2 — the old triggers won't fire
+// This is needed when migrating from V1 to V2, the old triggers won't fire
 // with Login V2, so they should be cleaned up.
 func (c *Client) cleanupActionsV1() {
 	// Clear V1 triggers first (empty action lists)

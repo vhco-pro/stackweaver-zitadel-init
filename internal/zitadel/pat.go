@@ -64,7 +64,7 @@ func ValidateStoredPAT(accessToken, dialAddr, domain string) bool {
 	if err != nil {
 		code := status.Code(err)
 		if code == codes.Unauthenticated || code == codes.PermissionDenied {
-			fmt.Printf("⚠️  Stored admin PAT is no longer valid (gRPC %s) — falling through to PAT file\n", code)
+			fmt.Printf("⚠️  Stored admin PAT is no longer valid (gRPC %s), falling through to PAT file\n", code)
 			return false
 		}
 		fmt.Printf("⚠️  Could not validate stored PAT (%v), assuming valid\n", err)

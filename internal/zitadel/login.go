@@ -178,7 +178,7 @@ func (c *Client) EnsureLoginServiceUser() (string, string, error) {
 	}
 
 	// Only create a new PAT for newly created users. For existing users, return
-	// empty string — the caller (writeKubernetesSecretFromEnv / writeConfigFiles)
+	// empty string, the caller (writeKubernetesSecretFromEnv / writeConfigFiles)
 	// will preserve the existing token from the K8s Secret or .env file.
 	if isNewUser {
 		token, err := c.createLoginServicePAT(userID)
