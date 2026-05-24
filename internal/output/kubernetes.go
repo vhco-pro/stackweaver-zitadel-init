@@ -29,7 +29,7 @@ func preserveExisting(newValue string, existing map[string]string, key string) s
 // WriteKubernetesSecret reads K8S_* env vars and patches the Zitadel
 // Secret with the generated credentials. When Zitadel returns an empty value
 // for a key (e.g. client-secret on an existing app), the existing value in the
-// K8s Secret is preserved — mirroring the Docker Compose path which reads the
+// K8s Secret is preserved, mirroring the Docker Compose path which reads the
 // existing .env before writing (see WriteComposeEnv).
 func WriteKubernetesSecret(kc *k8s.Client, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey string) error {
 	secretName := os.Getenv("K8S_SECRET_NAME")

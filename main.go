@@ -46,8 +46,8 @@ func main() {
 	// emptyDir is empty and the PAT file never appears. To handle this:
 	//
 	//   1. ZITADEL_PAT env var (highest priority, always works)
-	//   2. K8s Secret (fastest — check before waiting for file)
-	//   3. PAT file from emptyDir (first boot — Zitadel writes it)
+	//   2. K8s Secret (fastest, check before waiting for file)
+	//   3. PAT file from emptyDir (first boot, Zitadel writes it)
 	//
 	// After a successful file-based read, the PAT is also persisted into the
 	// K8s Secret so future pod restarts can use source (2).
@@ -65,7 +65,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Check K8s Secret FIRST — on pod restarts with existing DB, this is
+		// Check K8s Secret FIRST, on pod restarts with existing DB, this is
 		// instant and avoids wasting 30s waiting for a PAT file that will never
 		// appear (Zitadel only writes it during FirstInstance).
 		var k8sErr error
@@ -90,7 +90,7 @@ func main() {
 				accessToken = storedPAT
 				fmt.Println("✅ Using admin PAT from K8s Secret")
 			} else {
-				// Stored PAT is stale — the Zitadel DB was wiped (e.g. PVC deleted)
+				// Stored PAT is stale, the Zitadel DB was wiped (e.g. PVC deleted)
 				// but the secret was kept. Fall through to the PAT file written by
 				// Zitadel's FirstInstance bootstrap on the fresh DB.
 				fmt.Println("ℹ️  Stored PAT is stale, waiting for PAT file (fresh DB)...")
@@ -106,13 +106,13 @@ func main() {
 				fmt.Println("✅ Using PAT from file (fresh DB after wipe)")
 			}
 		} else {
-			// No PAT in secret — this is either a first install (PAT file will
+			// No PAT in secret, this is either a first install (PAT file will
 			// appear during FirstInstance) or the secret was never populated.
 			// Wait for the PAT file with a generous timeout.
 			fmt.Println("ℹ️  No admin PAT in K8s Secret, waiting for PAT file (first boot)...")
 			pat, err := zitadel.WaitForPATWithTimeout(patPath, 5*time.Minute)
 			if err != nil {
-				fmt.Println("❌ No admin PAT found — neither in K8s Secret nor PAT file")
+				fmt.Println("❌ No admin PAT found, neither in K8s Secret nor PAT file")
 				fmt.Println("   This usually means the first install did not complete successfully.")
 				fmt.Println("   To recover: delete both the Zitadel PostgreSQL PVC and the Zitadel")
 				fmt.Println("   secret, then reinstall to allow a clean first-time initialization.")
@@ -237,7 +237,7 @@ func main() {
 		}
 		if !hasLocalhost {
 			domains = append(domains, "localhost")
-			fmt.Printf("ℹ️  ExternalDomain is %q — auto-adding localhost as custom domain for internal access\n", zitadelDefaults.ExternalDomain)
+			fmt.Printf("ℹ️  ExternalDomain is %q, auto-adding localhost as custom domain for internal access\n", zitadelDefaults.ExternalDomain)
 		}
 	}
 
@@ -268,7 +268,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Write credentials — K8s: patch the Secret directly; Docker Compose: write .env.
+	// Write credentials, K8s: patch the Secret directly; Docker Compose: write .env.
 	if k8s.IsRunning() {
 		if kc == nil {
 			var k8sErr error
@@ -302,7 +302,7 @@ func main() {
 
 		// Wait for the OIDC projection to be ready before restarting consumers.
 		// Consumers must not restart until Zitadel can resolve the client ID on
-		// the /oauth/v2/authorize endpoint — otherwise the frontend gets
+		// the /oauth/v2/authorize endpoint, otherwise the frontend gets
 		// Errors.App.NotFound until the projection catches up (up to 20+ min on
 		// a cold or resource-constrained cluster).
 		// This runs after ALL setup so time spent on app/user creation counts

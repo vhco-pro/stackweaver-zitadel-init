@@ -20,7 +20,7 @@ import (
 // underlying record table but is still attached to a login policy
 // (the projection inconsistency observed 2026-05-12). When Update
 // against that ID surfaces NotFound, the right move is to fall
-// through to Create rather than fail or — worse — silently log
+// through to Create rather than fail or, worse, silently log
 // "Updated" when nothing actually happened.
 func isNotExisting(err error) bool {
 	if err == nil {
@@ -50,12 +50,12 @@ func isNotExisting(err error) bool {
 //      visible to the user is visible here, and vice versa. That removes
 //      the dual-source-of-truth bug.
 //   3. We only care about IdPs that are actually wired into the login
-//      flow — any orphan IdP not attached to the policy is invisible
+//      flow, any orphan IdP not attached to the policy is invisible
 //      and harmless. Looking only at attachments narrows the dedup
 //      target to what actually matters.
 //
 // Returning ALL matches (not just the first) lets the caller sweep
-// duplicates created by prior runs — see the dedup branch in the
+// duplicates created by prior runs, see the dedup branch in the
 // Configure*Provider functions.
 func (c *Client) findInstanceProvidersByName(name string) ([]string, error) {
 	resp, err := c.adminService.ListLoginPolicyIDPs(c.ctx, &admin.ListLoginPolicyIDPsRequest{})
@@ -79,7 +79,7 @@ func (c *Client) findInstanceProvidersByName(name string) ([]string, error) {
 // Configure*Provider functions to clean up duplicates created by prior
 // runs (see findInstanceProvidersByName for why duplicates accumulated).
 // Best-effort: logs and continues on per-ID failure rather than aborting
-// the whole init — a stuck duplicate is less harmful than a failed init
+// the whole init, a stuck duplicate is less harmful than a failed init
 // run that leaves the stack half-configured.
 func (c *Client) sweepDuplicateIDPs(ids []string, providerName string) {
 	for _, id := range ids {
@@ -98,7 +98,7 @@ func (c *Client) sweepDuplicateIDPs(ids []string, providerName string) {
 
 // addIDPToDefaultLoginPolicy attaches an instance-level IdP to the
 // DEFAULT (instance-level) login policy so the button appears on the
-// login screen for every org. Idempotent — "already exists" is treated
+// login screen for every org. Idempotent, "already exists" is treated
 // as success. Wave 14: switched from `mgmtService.AddIDPToLoginPolicy`
 // (which targeted the org-level custom login policy and required the
 // caller's PAT to have org-scoped read access to the IdP) to
@@ -151,7 +151,7 @@ func (c *Client) ConfigureAzureADProvider(clientID, clientSecret, tenantID strin
 	// Try Update first if a same-named provider is reported by the
 	// projection. If the projection is stale and the record was actually
 	// deleted (Wave 14 observed this on a previous-deploy upgrade), the
-	// Update will surface NotFound — fall through to Create.
+	// Update will surface NotFound, fall through to Create.
 	//
 	// If MULTIPLE same-named providers exist (a prior run with the broken
 	// name-filter search created duplicates), keep the first, sweep the
@@ -161,7 +161,7 @@ func (c *Client) ConfigureAzureADProvider(clientID, clientSecret, tenantID strin
 		return fmt.Errorf("failed to check for existing Azure AD provider: %w", err)
 	}
 	if len(existingIDs) > 1 {
-		fmt.Printf("⚠️  Found %d duplicate Azure AD providers — sweeping %d\n", len(existingIDs), len(existingIDs)-1)
+		fmt.Printf("⚠️  Found %d duplicate Azure AD providers, sweeping %d\n", len(existingIDs), len(existingIDs)-1)
 		c.sweepDuplicateIDPs(existingIDs[1:], providerName)
 	}
 	var existingID string
@@ -184,7 +184,7 @@ func (c *Client) ConfigureAzureADProvider(clientID, clientSecret, tenantID strin
 			fmt.Printf("✅ Updated Azure AD provider: %s\n", existingID)
 			return c.addIDPToDefaultLoginPolicy(existingID)
 		case isNotExisting(updErr):
-			fmt.Printf("ℹ️  Stale projection entry %s for Azure AD — falling through to Create\n", existingID)
+			fmt.Printf("ℹ️  Stale projection entry %s for Azure AD, falling through to Create\n", existingID)
 		default:
 			return fmt.Errorf("failed to update Azure AD provider: %w", updErr)
 		}
@@ -209,7 +209,7 @@ func (c *Client) ConfigureAzureADProvider(clientID, clientSecret, tenantID strin
 
 // ConfigureGenericOIDCProvider configures a generic OIDC IdP (Okta,
 // AWS Cognito, etc.) at INSTANCE level. Same Wave-14 rationale as
-// ConfigureAzureADProvider — the picker fetch in the auth proxy uses
+// ConfigureAzureADProvider, the picker fetch in the auth proxy uses
 // a SYSTEM-scope PAT, so providers MUST live at instance level.
 // Skipped if clientID is empty.
 func (c *Client) ConfigureGenericOIDCProvider(name, issuer, clientID, clientSecret string) error {
@@ -233,7 +233,7 @@ func (c *Client) ConfigureGenericOIDCProvider(name, issuer, clientID, clientSecr
 		return fmt.Errorf("failed to check for existing OIDC provider: %w", err)
 	}
 	if len(existingIDs) > 1 {
-		fmt.Printf("⚠️  Found %d duplicate OIDC providers named '%s' — sweeping %d\n", len(existingIDs), name, len(existingIDs)-1)
+		fmt.Printf("⚠️  Found %d duplicate OIDC providers named '%s', sweeping %d\n", len(existingIDs), name, len(existingIDs)-1)
 		c.sweepDuplicateIDPs(existingIDs[1:], name)
 	}
 	var existingID string
@@ -256,7 +256,7 @@ func (c *Client) ConfigureGenericOIDCProvider(name, issuer, clientID, clientSecr
 			fmt.Printf("✅ Updated Generic OIDC provider '%s': %s\n", name, existingID)
 			return c.addIDPToDefaultLoginPolicy(existingID)
 		case isNotExisting(updErr):
-			fmt.Printf("ℹ️  Stale projection entry %s for OIDC provider '%s' — falling through to Create\n", existingID, name)
+			fmt.Printf("ℹ️  Stale projection entry %s for OIDC provider '%s', falling through to Create\n", existingID, name)
 		default:
 			return fmt.Errorf("failed to update Generic OIDC provider '%s': %w", name, updErr)
 		}

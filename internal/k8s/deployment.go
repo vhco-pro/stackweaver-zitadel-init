@@ -15,7 +15,7 @@ import (
 
 // RestartDeployment triggers a rolling restart by patching the restartedAt
 // annotation on the pod template. If Stakater Reloader annotations are present
-// on the deployment, the explicit restart is skipped — Reloader will handle it
+// on the deployment, the explicit restart is skipped, Reloader will handle it
 // automatically when the Secret changes.
 func (k *Client) RestartDeployment(deploymentName, namespace, zitadelSecretName string) error {
 	url := fmt.Sprintf("%s/apis/apps/v1/namespaces/%s/deployments/%s", k.apiBase, namespace, deploymentName)
@@ -34,7 +34,7 @@ func (k *Client) RestartDeployment(deploymentName, namespace, zitadelSecretName 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		fmt.Printf("  ℹ️  deployment %q not found — skipping restart\n", deploymentName)
+		fmt.Printf("  ℹ️  deployment %q not found, skipping restart\n", deploymentName)
 		return nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -53,19 +53,19 @@ func (k *Client) RestartDeployment(deploymentName, namespace, zitadelSecretName 
 
 	ann := deploy.Metadata.Annotations
 	if ann["reloader.stakater.com/auto"] == "true" {
-		fmt.Printf("  ℹ️  Reloader auto-watch detected on %q — skipping manual restart\n", deploymentName)
+		fmt.Printf("  ℹ️  Reloader auto-watch detected on %q, skipping manual restart\n", deploymentName)
 		return nil
 	}
 	if reload := ann["secret.reloader.stakater.com/reload"]; reload != "" {
 		for _, name := range strings.Split(reload, ",") {
 			if strings.TrimSpace(name) == zitadelSecretName {
-				fmt.Printf("  ℹ️  Reloader secret-watch detected on %q — skipping manual restart\n", deploymentName)
+				fmt.Printf("  ℹ️  Reloader secret-watch detected on %q, skipping manual restart\n", deploymentName)
 				return nil
 			}
 		}
 	}
 
-	// No Reloader — patch the restartedAt annotation.
+	// No Reloader, patch the restartedAt annotation.
 	patch := map[string]any{
 		"spec": map[string]any{
 			"template": map[string]any{
