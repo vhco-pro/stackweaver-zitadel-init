@@ -1,5 +1,7 @@
 # Stackweaver™ Zitadel Init
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vhco-pro/stackweaver-zitadel-init/badge)](https://scorecard.dev/viewer/?uri=github.com/vhco-pro/stackweaver-zitadel-init)
+
 Initialization container for the [Stackweaver](https://github.com/vhco-pro/stackweaver) DevOps platform. Configures Zitadel OIDC with the required projects, applications, and service accounts.
 
 > **This repository is auto-synced from the Stackweaver monorepo. Do not make changes here directly.**
