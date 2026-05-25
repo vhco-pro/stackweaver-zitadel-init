@@ -1,4 +1,4 @@
-# Stackweaver™ Zitadel Init
+# Stackweaver Zitadel Init
 
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vhco-pro/stackweaver-zitadel-init/badge)](https://scorecard.dev/viewer/?uri=github.com/vhco-pro/stackweaver-zitadel-init)
 
