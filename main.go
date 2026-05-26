@@ -356,3 +356,4 @@ func main() {
 	fmt.Println("Configuration files have been written.")
 	fmt.Println("Restart your services to pick up the new config.")
 }
+// sync smoke test 1779753492
