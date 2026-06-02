@@ -64,11 +64,10 @@ ZITADEL_API_CLIENT_SECRET=%s
 ZITADEL_LOGIN_SERVICE_USER_TOKEN=%s
 ZITADEL_LOGIN_SERVICE_USER_ID=%s
 ZITADEL_ISSUER=%s
-VITE_ZITADEL_ISSUER=%s
 ZITADEL_EXTERNAL_HOST=%s
 ZITADEL_WEBHOOK_IDP_SYNC_KEY=%s
 ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=%s
-`, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, issuerURL, issuerURL, externalHost, idpSyncKey, complementTokenKey)
+`, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, issuerURL, externalHost, idpSyncKey, complementTokenKey)
 
 	if err := os.WriteFile(deployEnvPath, []byte(deployEnv), 0644); err != nil {
 		return fmt.Errorf("failed to write deploy/.env: %w", err)
