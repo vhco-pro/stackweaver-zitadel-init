@@ -1,8 +1,19 @@
+<div align="center">
+
+<img src="https://sw.vhco.pro/logo.png" alt="Stackweaver" width="150" />
+
 # Stackweaver™ Zitadel Init
 
+[![Release](https://github.com/vhco-pro/stackweaver-zitadel-init/actions/workflows/release.yml/badge.svg)](https://github.com/vhco-pro/stackweaver-zitadel-init/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/vhco-pro/stackweaver-zitadel-init?sort=semver)](https://github.com/vhco-pro/stackweaver-zitadel-init/releases/latest)
+[![CodeQL](https://github.com/vhco-pro/stackweaver-zitadel-init/actions/workflows/codeql.yml/badge.svg)](https://github.com/vhco-pro/stackweaver-zitadel-init/actions/workflows/codeql.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/vhco-pro/stackweaver-zitadel-init/badge)](https://scorecard.dev/viewer/?uri=github.com/vhco-pro/stackweaver-zitadel-init)
+[![License](https://img.shields.io/badge/license-BSL%201.1-blue)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-sw.vhco.pro-0ea5e9)](https://sw.vhco.pro/docs)
 
 Initialization container for the [Stackweaver](https://sw.vhco.pro) DevOps platform. Configures Zitadel OIDC with the required projects, applications, and service accounts.
+
+</div>
 
 This is the public release repository for the Stackweaver Zitadel Init container. It is published from the Stackweaver source tree on every release. See the [release sync architecture](https://sw.vhco.pro/docs/security/sync-architecture) for how releases are built, signed, and mirrored here.
 
