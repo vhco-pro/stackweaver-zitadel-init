@@ -2,7 +2,7 @@
 
 <img src="https://sw.vhco.pro/logo.png" alt="Stackweaver" width="150" />
 
-# Stackweaver™ Zitadel Init
+# Stackweaver Zitadel Init
 
 [![Release](https://github.com/vhco-pro/stackweaver-zitadel-init/actions/workflows/release.yml/badge.svg)](https://github.com/vhco-pro/stackweaver-zitadel-init/actions/workflows/release.yml)
 [![Latest Release](https://img.shields.io/github/v/release/vhco-pro/stackweaver-zitadel-init?sort=semver)](https://github.com/vhco-pro/stackweaver-zitadel-init/releases/latest)
