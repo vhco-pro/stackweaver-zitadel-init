@@ -3,7 +3,7 @@ module github.com/michielvha/stackweaver/scripts/zitadel-init
 go 1.26.4
 
 require (
-	github.com/zitadel/zitadel-go/v3 v3.29.0
+	github.com/zitadel/zitadel-go/v3 v3.29.1
 	google.golang.org/grpc v1.81.1
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
