@@ -48,14 +48,23 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 	issuerURL := config.ComputeIssuerURL(zitadelDefaults)
 	fmt.Printf("ℹ️  Derived issuer URL from zitadel-defaults.yaml: %s\n", issuerURL)
 
-	// Derive external host for the auth-proxy's x-zitadel-instance-host forward.
-	// When ExternalDomain is a custom domain (not localhost), the api container
-	// forwards this header so Zitadel constructs IdP callback URLs using the
-	// external domain (e.g. https://zitadel.example.com/idps/callback) instead
-	// of https://localhost:8080/idps/callback.
-	externalHost := ""
-	if zitadelDefaults.ExternalDomain != "localhost" {
-		externalHost = zitadelDefaults.ExternalDomain
+	// External host for the auth-proxy's x-zitadel-instance-host forward — set to
+	// the instance's ExternalDomain ALWAYS, including "localhost". On the bridge
+	// network the api reaches Zitadel at `zitadel:8080`, so the request Host
+	// (`zitadel:8080`) never matches a registered instance domain; Zitadel resolves
+	// the instance from this header instead. (Under the old network_mode: host the
+	// internal addr was `localhost:8080`, which matched the localhost instance, so
+	// the header could be empty — no longer true.) It also makes Zitadel build IdP
+	// callback URLs on the right domain.
+	externalHost := zitadelDefaults.ExternalDomain
+
+	// Zitadel's --tlsMode must agree with the issuer scheme: `external` (TLS
+	// terminated by a proxy → https issuer over a plain-HTTP listener) when secure,
+	// `disabled` (http issuer, http listener) for plain-localhost dev. docker-compose.yml
+	// reads this as ${ZITADEL_TLS_MODE:-disabled} in the zitadel command.
+	tlsMode := "disabled"
+	if zitadelDefaults.ExternalSecure {
+		tlsMode = "external"
 	}
 
 	deployEnv := fmt.Sprintf(`ZITADEL_FRONTEND_CLIENT_ID=%s
@@ -65,9 +74,10 @@ ZITADEL_LOGIN_SERVICE_USER_TOKEN=%s
 ZITADEL_LOGIN_SERVICE_USER_ID=%s
 ZITADEL_ISSUER=%s
 ZITADEL_EXTERNAL_HOST=%s
+ZITADEL_TLS_MODE=%s
 ZITADEL_WEBHOOK_IDP_SYNC_KEY=%s
 ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=%s
-`, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, issuerURL, externalHost, idpSyncKey, complementTokenKey)
+`, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, issuerURL, externalHost, tlsMode, idpSyncKey, complementTokenKey)
 
 	if err := os.WriteFile(deployEnvPath, []byte(deployEnv), 0644); err != nil {
 		return fmt.Errorf("failed to write deploy/.env: %w", err)

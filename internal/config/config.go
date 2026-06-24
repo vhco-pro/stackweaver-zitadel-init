@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -34,8 +35,15 @@ type ZitadelDefaultsConfig struct {
 	ExternalSecure bool   `yaml:"ExternalSecure"`
 }
 
-// LoadZitadelDefaults reads ExternalDomain, ExternalPort, ExternalSecure from deploy/zitadel-defaults.yaml.
-// Falls back to localhost:8080 insecure if the file is missing or incomplete.
+// LoadZitadelDefaults resolves ExternalDomain, ExternalPort, ExternalSecure.
+// Precedence: ZITADEL_EXTERNAL* env vars > deploy/zitadel-defaults.yaml > localhost:8080 insecure.
+//
+// The env override lets the Docker Compose tunnel overlay switch the dev stack to its public
+// domain without editing the committed zitadel-defaults.yaml (which stays localhost so plain
+// `make up` is platform-agnostic). It uses Zitadel's own env naming (ZITADEL_EXTERNALDOMAIN,
+// ZITADEL_EXTERNALPORT, ZITADEL_EXTERNALSECURE) so the same vars configure both the Zitadel
+// container and this init step. Kubernetes/Helm sets none of these on zitadel-init, so its
+// behavior is unchanged (file/default fallback).
 func LoadZitadelDefaults(projectRoot string) ZitadelDefaultsConfig {
 	defaults := ZitadelDefaultsConfig{
 		ExternalDomain: "localhost",
@@ -46,20 +54,32 @@ func LoadZitadelDefaults(projectRoot string) ZitadelDefaultsConfig {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		fmt.Printf("⚠️  Could not read %s, using defaults: %v\n", path, err)
-		return defaults
+	} else {
+		var cfg ZitadelDefaultsConfig
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			fmt.Printf("⚠️  Could not parse %s, using defaults: %v\n", path, err)
+		} else {
+			if cfg.ExternalDomain != "" {
+				defaults.ExternalDomain = cfg.ExternalDomain
+			}
+			if cfg.ExternalPort != 0 {
+				defaults.ExternalPort = cfg.ExternalPort
+			}
+			defaults.ExternalSecure = cfg.ExternalSecure
+		}
 	}
-	var cfg ZitadelDefaultsConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		fmt.Printf("⚠️  Could not parse %s, using defaults: %v\n", path, err)
-		return defaults
+	// Environment overrides (highest precedence) — Zitadel's native ZITADEL_EXTERNAL* naming.
+	if v := os.Getenv("ZITADEL_EXTERNALDOMAIN"); v != "" {
+		defaults.ExternalDomain = v
 	}
-	if cfg.ExternalDomain != "" {
-		defaults.ExternalDomain = cfg.ExternalDomain
+	if v := os.Getenv("ZITADEL_EXTERNALPORT"); v != "" {
+		if p, perr := strconv.Atoi(v); perr == nil && p != 0 {
+			defaults.ExternalPort = p
+		}
 	}
-	if cfg.ExternalPort != 0 {
-		defaults.ExternalPort = cfg.ExternalPort
+	if v := os.Getenv("ZITADEL_EXTERNALSECURE"); v != "" {
+		defaults.ExternalSecure = v == "true" || v == "1"
 	}
-	defaults.ExternalSecure = cfg.ExternalSecure
 	return defaults
 }
 
