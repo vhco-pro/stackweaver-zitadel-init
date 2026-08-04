@@ -4,9 +4,41 @@ package zitadel
 
 import (
 	"fmt"
+	"time"
 
 	applicationV2 "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/application/v2"
 )
+
+// frontendOIDCClientID reads the OIDC ClientId of an app, retrying while Zitadel's query
+// projection catches up. On a cold instance GetApplication can fail (or return an OIDC config
+// without ClientId) for several seconds after CreateApplication; returning the ApplicationId
+// instead — the old fallback — poisons the frontend-client-id secret with a value that is not a
+// valid OIDC client_id and breaks every browser login on a fresh install. Failing is safe:
+// zitadel-init exits non-zero and is re-run.
+func (c *Client) frontendOIDCClientID(appID string) (string, *applicationV2.OIDCConfiguration, error) {
+	var lastErr error
+	for attempt := range 30 {
+		if attempt > 0 {
+			time.Sleep(2 * time.Second)
+		}
+		getResp, err := c.applicationService.GetApplication(c.ctx, &applicationV2.GetApplicationRequest{
+			ApplicationId: appID,
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if app := getResp.GetApplication(); app != nil {
+			if oidcConfig := app.GetOidcConfiguration(); oidcConfig != nil {
+				if clientID := oidcConfig.GetClientId(); clientID != "" {
+					return clientID, oidcConfig, nil
+				}
+			}
+		}
+		lastErr = fmt.Errorf("OIDC configuration has no ClientId yet")
+	}
+	return "", nil, fmt.Errorf("could not resolve OIDC ClientId for frontend app %s: %w", appID, lastErr)
+}
 
 // GetOrCreateFrontendApp finds or creates the frontend OIDC application.
 func (c *Client) GetOrCreateFrontendApp(orgID, projectID string, extraRedirectURIs, extraPostLogoutURIs []string) (string, error) {
@@ -38,31 +70,18 @@ func (c *Client) GetOrCreateFrontendApp(orgID, projectID string, extraRedirectUR
 	if err == nil && listResp != nil && len(listResp.GetApplications()) > 0 {
 		appID := listResp.GetApplications()[0].GetApplicationId()
 
-		// Get the app details to retrieve the ClientId from OIDC configuration
-		getResp, err := c.applicationService.GetApplication(c.ctx, &applicationV2.GetApplicationRequest{
-			ApplicationId: appID,
-		})
-		if err == nil && getResp != nil {
-			if app := getResp.GetApplication(); app != nil {
-				if oidcConfig := app.GetOidcConfiguration(); oidcConfig != nil {
-					clientID := oidcConfig.GetClientId()
-					if clientID != "" {
-						fmt.Printf("✅ Using existing frontend app: %s (ClientId: %s)\n", appID, clientID)
+		clientID, oidcConfig, err := c.frontendOIDCClientID(appID)
+		if err != nil {
+			return "", err
+		}
+		fmt.Printf("✅ Using existing frontend app: %s (ClientId: %s)\n", appID, clientID)
 
-						// Ensure redirect URIs are up to date
-						if err := c.ensureFrontendRedirectURIs(appID, projectID, oidcConfig, redirectURIs, postLogoutURIs); err != nil {
-							fmt.Printf("⚠️  Warning: could not update redirect URIs: %v\n", err)
-						}
-
-						return clientID, nil
-					}
-				}
-			}
+		// Ensure redirect URIs are up to date
+		if err := c.ensureFrontendRedirectURIs(appID, projectID, oidcConfig, redirectURIs, postLogoutURIs); err != nil {
+			fmt.Printf("⚠️  Warning: could not update redirect URIs: %v\n", err)
 		}
 
-		// Fall back to ApplicationId if ClientId not found
-		fmt.Printf("✅ Using existing frontend app: %s\n", appID)
-		return appID, nil
+		return clientID, nil
 	}
 
 	// Create new OIDC app
@@ -93,31 +112,11 @@ func (c *Client) GetOrCreateFrontendApp(orgID, projectID string, extraRedirectUR
 
 	appID := createResp.GetApplicationId()
 
-	// Get the app to retrieve ClientId (V2 API reads from event store, works immediately)
-	getResp, err := c.applicationService.GetApplication(c.ctx, &applicationV2.GetApplicationRequest{
-		ApplicationId: appID,
-	})
+	clientID, _, err := c.frontendOIDCClientID(appID)
 	if err != nil {
-		// If GetApplication fails, fall back to using ApplicationId
-		fmt.Printf("⚠️  Warning: Could not retrieve app details, using ApplicationId: %s\n", appID)
-	return appID, nil
+		return "", err
 	}
-
-	// Extract ClientId from OIDC configuration
-	var clientID string
-	if app := getResp.GetApplication(); app != nil {
-		if oidcConfig := app.GetOidcConfiguration(); oidcConfig != nil {
-			clientID = oidcConfig.GetClientId()
-		}
-	}
-
-	if clientID == "" {
-		// Fall back to ApplicationId if ClientId not found
-		clientID = appID
-		fmt.Printf("⚠️  Warning: ClientId not found in OIDC config, using ApplicationId: %s\n", appID)
-	} else {
-		fmt.Printf("✅ Created frontend app: %s (ClientId: %s)\n", appID, clientID)
-	}
+	fmt.Printf("✅ Created frontend app: %s (ClientId: %s)\n", appID, clientID)
 
 	return clientID, nil
 }
