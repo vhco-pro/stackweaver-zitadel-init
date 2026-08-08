@@ -68,7 +68,7 @@ func LoadZitadelDefaults(projectRoot string) ZitadelDefaultsConfig {
 			defaults.ExternalSecure = cfg.ExternalSecure
 		}
 	}
-	// Environment overrides (highest precedence) — Zitadel's native ZITADEL_EXTERNAL* naming.
+	// Environment overrides (highest precedence) - Zitadel's native ZITADEL_EXTERNAL* naming.
 	if v := os.Getenv("ZITADEL_EXTERNALDOMAIN"); v != "" {
 		defaults.ExternalDomain = v
 	}

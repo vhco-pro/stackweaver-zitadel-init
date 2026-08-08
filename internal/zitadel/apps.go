@@ -12,7 +12,7 @@ import (
 // frontendOIDCClientID reads the OIDC ClientId of an app, retrying while Zitadel's query
 // projection catches up. On a cold instance GetApplication can fail (or return an OIDC config
 // without ClientId) for several seconds after CreateApplication; returning the ApplicationId
-// instead — the old fallback — poisons the frontend-client-id secret with a value that is not a
+// instead - the old fallback - poisons the frontend-client-id secret with a value that is not a
 // valid OIDC client_id and breaks every browser login on a fresh install. Failing is safe:
 // zitadel-init exits non-zero and is re-run.
 func (c *Client) frontendOIDCClientID(appID string) (string, *applicationV2.OIDCConfiguration, error) {
