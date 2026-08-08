@@ -48,13 +48,13 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 	issuerURL := config.ComputeIssuerURL(zitadelDefaults)
 	fmt.Printf("ℹ️  Derived issuer URL from zitadel-defaults.yaml: %s\n", issuerURL)
 
-	// External host for the auth-proxy's x-zitadel-instance-host forward — set to
+	// External host for the auth-proxy's x-zitadel-instance-host forward - set to
 	// the instance's ExternalDomain ALWAYS, including "localhost". On the bridge
 	// network the api reaches Zitadel at `zitadel:8080`, so the request Host
 	// (`zitadel:8080`) never matches a registered instance domain; Zitadel resolves
 	// the instance from this header instead. (Under the old network_mode: host the
 	// internal addr was `localhost:8080`, which matched the localhost instance, so
-	// the header could be empty — no longer true.) It also makes Zitadel build IdP
+	// the header could be empty - no longer true.) It also makes Zitadel build IdP
 	// callback URLs on the right domain.
 	externalHost := zitadelDefaults.ExternalDomain
 
