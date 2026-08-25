@@ -54,7 +54,10 @@ func WriteKubernetesSecret(kc *k8s.Client, frontendClientID, apiClientID, apiCli
 	// Read existing secret values so we can preserve them when Zitadel doesn't
 	// return the value (client-secret and webhook signing keys are only returned
 	// on first creation, not on subsequent Get calls).
-	existing := kc.ReadAllSecretKeys(secretName, namespace)
+	existing, err := kc.ReadAllSecretKeys(secretName, namespace)
+	if err != nil {
+		return fmt.Errorf("read existing zitadel secret %q: %w", secretName, err)
+	}
 
 	data := map[string]string{
 		keyClientID:           apiClientID,
