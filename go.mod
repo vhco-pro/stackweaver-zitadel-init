@@ -1,6 +1,6 @@
 module github.com/michielvha/stackweaver/scripts/zitadel-init
 
-go 1.26.4
+go 1.26.6
 
 require (
 	github.com/zitadel/zitadel-go/v3 v3.29.3
