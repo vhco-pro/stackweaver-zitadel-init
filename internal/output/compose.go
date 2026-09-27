@@ -13,10 +13,10 @@ import (
 
 // WriteComposeEnv writes the Docker Compose deploy/.env file with all generated credentials.
 func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string) error {
-	// Write deploy/.env - SINGLE SOURCE OF TRUTH for all environment variables
-	// All docker-compose services read from this file via env_file: - ./.env
+	// Update the Zitadel-managed keys in deploy/.env, which every Compose service
+	// reads via env_file: - ./.env. Other entries in the file are preserved.
 	deployEnvPath := filepath.Join(projectRoot, "deploy", ".env")
-	if err := os.MkdirAll(filepath.Dir(deployEnvPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(deployEnvPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create deploy dir: %w", err)
 	}
 
@@ -67,24 +67,32 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 		tlsMode = "external"
 	}
 
-	deployEnv := fmt.Sprintf(`ZITADEL_FRONTEND_CLIENT_ID=%s
-ZITADEL_API_CLIENT_ID=%s
-ZITADEL_API_CLIENT_SECRET=%s
-ZITADEL_LOGIN_SERVICE_USER_TOKEN=%s
-ZITADEL_LOGIN_SERVICE_USER_ID=%s
-ZITADEL_ISSUER=%s
-ZITADEL_EXTERNAL_HOST=%s
-ZITADEL_TLS_MODE=%s
-ZITADEL_WEBHOOK_IDP_SYNC_KEY=%s
-ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=%s
-`, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, issuerURL, externalHost, tlsMode, idpSyncKey, complementTokenKey)
-
-	if err := os.WriteFile(deployEnvPath, []byte(deployEnv), 0644); err != nil {
-		return fmt.Errorf("failed to write deploy/.env: %w", err)
+	managed := [][2]string{
+		{"ZITADEL_FRONTEND_CLIENT_ID", frontendClientID},
+		{"ZITADEL_API_CLIENT_ID", apiClientID},
+		{"ZITADEL_API_CLIENT_SECRET", apiClientSecret},
+		{"ZITADEL_LOGIN_SERVICE_USER_TOKEN", loginServiceToken},
+		{"ZITADEL_LOGIN_SERVICE_USER_ID", loginServiceUserID},
+		{"ZITADEL_ISSUER", issuerURL},
+		{"ZITADEL_EXTERNAL_HOST", externalHost},
+		{"ZITADEL_TLS_MODE", tlsMode},
+		{"ZITADEL_WEBHOOK_IDP_SYNC_KEY", idpSyncKey},
+		{"ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY", complementTokenKey},
 	}
-	fmt.Println("✅ Wrote deploy/.env (single source of truth for all env vars)")
 
-	// NOTE: Only deploy/.env is written - this is the single source of truth
+	// Merge rather than overwrite. In the customer Compose bundle this file is
+	// the operator's own .env (ENCRYPTION_KEY, POSTGRES_*, VITE_*), mounted into
+	// the init container; replacing it wiped those values on every init run.
+	existing, err := os.ReadFile(deployEnvPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading %s: %w", deployEnvPath, err)
+	}
+	if err := os.WriteFile(deployEnvPath, []byte(mergeEnv(string(existing), managed)), 0o644); err != nil {
+		return fmt.Errorf("writing deploy/.env: %w", err)
+	}
+	fmt.Println("✅ Updated the Zitadel keys in deploy/.env (other entries left as they were)")
+
+	// NOTE: Only deploy/.env is written.
 	// All docker-compose services use env_file: - ./.env which reads from deploy/.env
 	// docker-compose.yml uses ${ZITADEL_ISSUER:-http://localhost:8080} substitution
 	// so the issuer URL is automatically propagated to API and frontend.
@@ -92,4 +100,40 @@ ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=%s
 	// After init completes, restart services to pick up the correct issuer.
 
 	return nil
+}
+
+// mergeEnv sets each managed KEY=value in an env file's content: a key already
+// present is replaced in place (first occurrence; later duplicates are dropped
+// so the file stays unambiguous), a missing one is appended. Every other line,
+// including comments and blank lines, is kept exactly as it was.
+func mergeEnv(existing string, managed [][2]string) string {
+	values := make(map[string]string, len(managed))
+	for _, kv := range managed {
+		values[kv[0]] = kv[1]
+	}
+	written := make(map[string]bool, len(managed))
+
+	var out []string
+	if existing != "" {
+		for _, line := range strings.Split(strings.TrimSuffix(existing, "\n"), "\n") {
+			key, _, isAssignment := strings.Cut(line, "=")
+			key = strings.TrimSpace(key)
+			value, isManaged := values[key]
+			if !isAssignment || !isManaged || strings.HasPrefix(strings.TrimSpace(line), "#") {
+				out = append(out, line)
+				continue
+			}
+			if written[key] {
+				continue
+			}
+			out = append(out, key+"="+value)
+			written[key] = true
+		}
+	}
+	for _, kv := range managed {
+		if !written[kv[0]] {
+			out = append(out, kv[0]+"="+kv[1])
+		}
+	}
+	return strings.Join(out, "\n") + "\n"
 }
