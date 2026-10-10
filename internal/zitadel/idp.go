@@ -3,8 +3,10 @@
 package zitadel
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/admin"
@@ -120,32 +122,52 @@ func (c *Client) addIDPToDefaultLoginPolicy(idpID string) error {
 	return nil
 }
 
+// azureTenant picks the Azure AD tenant (#829 Q11). Without a tenant ID the "common" tenant
+// would let any Microsoft account sign in and, because a configured IdP may create accounts
+// (Q9), create a verified account, so it needs an explicit opt-in.
+func azureTenant(tenantID string, allowMultiTenant bool) (*idppb.AzureADTenant, error) {
+	switch {
+	case tenantID != "":
+		return &idppb.AzureADTenant{Type: &idppb.AzureADTenant_TenantId{TenantId: tenantID}}, nil
+	case allowMultiTenant:
+		return &idppb.AzureADTenant{Type: &idppb.AzureADTenant_TenantType{
+			TenantType: idppb.AzureADTenantType_AZURE_AD_TENANT_TYPE_COMMON,
+		}}, nil
+	default:
+		return nil, errors.New("AZURE_AD_TENANT_ID is empty: set it to your organisation's tenant, or set AZURE_AD_ALLOW_MULTI_TENANT=true to let any Microsoft account sign in and create an account")
+	}
+}
+
+// externalIdPOptions are the options of every IdP zitadel-init configures. User creation is
+// allowed: configuring the IdP is the operator's consent for its users to get accounts (#829
+// Q9), and the auth proxy creates SSO accounts only for IdPs Zitadel reports as creation-allowed.
+func externalIdPOptions() *idppb.Options {
+	return &idppb.Options{
+		IsCreationAllowed: true,                                              // the auth proxy's SSO-creation gate reads this
+		IsAutoCreation:    true,                                              // JIT provisioning
+		IsAutoUpdate:      true,                                              // Sync profile on subsequent logins
+		IsLinkingAllowed:  true,                                              // Link to existing Zitadel users
+		AutoLinking:       idppb.AutoLinkingOption_AUTO_LINKING_OPTION_EMAIL, // Match by email
+	}
+}
+
 // ConfigureAzureADProvider configures Azure AD / Entra ID as an
 // INSTANCE-level external identity provider. Instance scope so the
 // auth-proxy's SYSTEM-scoped PAT can read the provider when serving
 // the unauthenticated IdP picker (Wave 14 root cause for AC-2).
 // Skipped if clientID is empty.
-func (c *Client) ConfigureAzureADProvider(clientID, clientSecret, tenantID string) error {
+func (c *Client) ConfigureAzureADProvider(clientID, clientSecret, tenantID string, allowMultiTenant bool) error {
 	if clientID == "" {
 		return nil
 	}
 
 	const providerName = "Microsoft"
 
-	tenant := &idppb.AzureADTenant{}
-	if tenantID != "" {
-		tenant.Type = &idppb.AzureADTenant_TenantId{TenantId: tenantID}
-	} else {
-		tenant.Type = &idppb.AzureADTenant_TenantType{
-			TenantType: idppb.AzureADTenantType_AZURE_AD_TENANT_TYPE_COMMON,
-		}
+	tenant, err := azureTenant(tenantID, allowMultiTenant)
+	if err != nil {
+		return err
 	}
-	options := &idppb.Options{
-		IsAutoCreation:   true,                                              // JIT provisioning
-		IsAutoUpdate:     true,                                              // Sync profile on subsequent logins
-		IsLinkingAllowed: true,                                              // Link to existing Zitadel users
-		AutoLinking:      idppb.AutoLinkingOption_AUTO_LINKING_OPTION_EMAIL, // Match by email
-	}
+	options := externalIdPOptions()
 	scopes := []string{"openid", "profile", "email", "User.Read"}
 
 	// Try Update first if a same-named provider is reported by the
@@ -220,12 +242,7 @@ func (c *Client) ConfigureGenericOIDCProvider(name, issuer, clientID, clientSecr
 		name = "SSO"
 	}
 
-	options := &idppb.Options{
-		IsAutoCreation:   true,
-		IsAutoUpdate:     true,
-		IsLinkingAllowed: true,
-		AutoLinking:      idppb.AutoLinkingOption_AUTO_LINKING_OPTION_EMAIL,
-	}
+	options := externalIdPOptions()
 	scopes := []string{"openid", "profile", "email", "groups"}
 
 	existingIDs, err := c.findInstanceProvidersByName(name)
@@ -285,6 +302,14 @@ func (c *Client) ConfigureIdentityProviders() error {
 	azureClientID := os.Getenv("AZURE_AD_CLIENT_ID")
 	azureClientSecret := os.Getenv("AZURE_AD_CLIENT_SECRET")
 	azureTenantID := os.Getenv("AZURE_AD_TENANT_ID")
+	allowMultiTenant := false
+	if raw := strings.TrimSpace(os.Getenv("AZURE_AD_ALLOW_MULTI_TENANT")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			return fmt.Errorf("parsing AZURE_AD_ALLOW_MULTI_TENANT %q: %w", raw, err)
+		}
+		allowMultiTenant = parsed
+	}
 
 	oidcName := os.Getenv("OIDC_IDP_NAME")
 	oidcIssuer := os.Getenv("OIDC_IDP_ISSUER")
@@ -303,7 +328,7 @@ func (c *Client) ConfigureIdentityProviders() error {
 	fmt.Println("--- Configuring External Identity Providers ---")
 
 	if hasAzure {
-		if err := c.ConfigureAzureADProvider(azureClientID, azureClientSecret, azureTenantID); err != nil {
+		if err := c.ConfigureAzureADProvider(azureClientID, azureClientSecret, azureTenantID, allowMultiTenant); err != nil {
 			return fmt.Errorf("failed to configure Azure AD provider: %w", err)
 		}
 	}

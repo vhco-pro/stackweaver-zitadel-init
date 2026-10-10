@@ -98,6 +98,13 @@ func NewClient(accessToken, dialAddr, domain string) (*Client, error) {
 	}, nil
 }
 
+// Admin returns the Zitadel admin (instance-level) service, which the identity-mail reconcilers
+// accept through their own narrow interfaces.
+func (c *Client) Admin() admin.AdminServiceClient { return c.adminService }
+
+// Management returns the Zitadel management (org-level) service.
+func (c *Client) Management() management.ManagementServiceClient { return c.mgmtService }
+
 // WaitForReady polls the gRPC endpoint until Zitadel is reachable.
 func WaitForReady(grpcAddr string) error {
 	if grpcAddr == "" {

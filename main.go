@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,6 +17,12 @@ import (
 )
 
 func main() {
+	// The Helm reconcile Job (#829 D9) applies only the identity-mail settings and exits.
+	if reconcileOnly(os.Getenv) {
+		runReconcileOnly()
+		return
+	}
+
 	patPath := os.Getenv("ZITADEL_PAT_PATH")
 	if patPath == "" {
 		patPath = "/pat/admin.pat"
@@ -266,6 +273,16 @@ func main() {
 	if err != nil {
 		fmt.Printf("❌ Failed to configure Zitadel Actions: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Identity mail (#829): in Compose this container is separate from Zitadel, so a failure here
+	// stops the run loudly. In Kubernetes the Helm reconcile Job owns these steps, because a crash
+	// loop in this sidecar would take the whole Zitadel pod, and every login, down with it.
+	if !k8s.IsRunning() {
+		if err := reconcileIdentityMail(context.Background(), client, false); err != nil {
+			fmt.Printf("❌ %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Write credentials, K8s: patch the Secret directly; Docker Compose: write .env.
