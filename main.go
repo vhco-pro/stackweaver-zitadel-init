@@ -256,7 +256,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		fmt.Println("ℹ️  No custom domains configured (set custom_domains in deploy/zitadel-init.yaml or ZITADEL_CUSTOM_DOMAINS)")
+		fmt.Println("ℹ️  No custom domains configured (set custom_domains in zitadel-init.yaml or ZITADEL_CUSTOM_DOMAINS)")
 	}
 
 	// Configure external identity providers (Azure AD, Generic OIDC)
@@ -370,7 +370,6 @@ func main() {
 		select {}
 	}
 
-	fmt.Println("Configuration files have been written.")
-	fmt.Println("Restart your services to pick up the new config.")
+	fmt.Println(output.ComposeClosingMessage())
 }
 // sync smoke test 1779753492

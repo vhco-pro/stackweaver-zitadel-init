@@ -11,6 +11,20 @@ import (
 	"github.com/michielvha/stackweaver/scripts/zitadel-init/internal/config"
 )
 
+// ComposeEnvWrittenMessage reports the file WriteComposeEnv updated, by the name it has where the
+// user ran Compose: `.env` beside docker-compose.yml. Inside this container the same file is
+// <PROJECT_ROOT>/deploy/.env, a path the user does not have.
+func ComposeEnvWrittenMessage() string {
+	return "✅ Updated the Zitadel keys in .env, beside your docker-compose.yml (other entries left as they were)"
+}
+
+// ComposeClosingMessage tells the user how the generated values reach services that were created
+// before this run. Compose reads .env when it creates a container, so a restart is not enough;
+// `docker compose up -d` recreates the services whose configuration changed.
+func ComposeClosingMessage() string {
+	return "Configuration written. Services that were already running before this run do not have the new values yet: apply them with `docker compose up -d`."
+}
+
 // WriteComposeEnv writes the Docker Compose deploy/.env file with all generated credentials.
 func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string) error {
 	// Update the Zitadel-managed keys in deploy/.env, which every Compose service
@@ -90,7 +104,7 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 	if err := os.WriteFile(deployEnvPath, []byte(mergeEnv(string(existing), managed)), 0o644); err != nil {
 		return fmt.Errorf("writing deploy/.env: %w", err)
 	}
-	fmt.Println("✅ Updated the Zitadel keys in deploy/.env (other entries left as they were)")
+	fmt.Println(ComposeEnvWrittenMessage())
 
 	// NOTE: Only deploy/.env is written.
 	// All docker-compose services use env_file: - ./.env which reads from deploy/.env

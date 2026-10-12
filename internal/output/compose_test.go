@@ -2,7 +2,10 @@
 
 package output
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMergeEnv(t *testing.T) {
 	managed := [][2]string{
@@ -46,5 +49,26 @@ func TestMergeEnv(t *testing.T) {
 				t.Fatalf("mergeEnv() =\n%q\nwant\n%q", got, tt.want)
 			}
 		})
+	}
+}
+
+// #866 AC7: in a Compose run the user stands in the directory holding docker-compose.yml, where
+// the file zitadel-init wrote is `.env`. `deploy/.env` is only true inside the container, and
+// "restart your services" does not make a container reread an env file.
+func TestComposeMessages(t *testing.T) {
+	written := ComposeEnvWrittenMessage()
+	if strings.Contains(written, "deploy/") {
+		t.Errorf("the written-file message names a path the user does not have: %q", written)
+	}
+	if !strings.Contains(written, ".env") {
+		t.Errorf("the written-file message must name .env: %q", written)
+	}
+
+	closing := ComposeClosingMessage()
+	if strings.Contains(strings.ToLower(closing), "restart your services") {
+		t.Errorf("the closing message tells the user to restart, which does not reread an env file: %q", closing)
+	}
+	if !strings.Contains(closing, "docker compose up -d") {
+		t.Errorf("the closing message must name the command that applies the values: %q", closing)
 	}
 }
