@@ -42,7 +42,11 @@ func reconcileIdentityMail(ctx context.Context, c *zitadel.Client, kubernetes bo
 	if err != nil {
 		return err
 	}
-	mode, err := config.ParseNotificationMode(os.Getenv("STACKWEAVER_NOTIFICATION_MODE"), kubernetes)
+	mode, err := config.ParseNotificationMode(
+		os.Getenv("STACKWEAVER_NOTIFICATION_MODE"),
+		config.AllowReturnCode(os.Getenv(config.AllowReturnCodeVar)),
+		kubernetes,
+	)
 	if err != nil {
 		return err
 	}
