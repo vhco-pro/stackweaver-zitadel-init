@@ -16,7 +16,7 @@ permissions: {}
 jobs:
   analyze:
     if: ${{ github.event.repository.visibility == 'public' }}
-    uses: vhco-pro/.github/.github/workflows/reusable-codeql-go.yml@de04290ceb4232e4ec50b4873712d76b1bf48aa6 # v1.0.0
+    uses: vhco-pro/.github/.github/workflows/reusable-codeql-go.yml@f7397eb203bc6b49331c48f2be89d1df20f051f7 # v1.1.2
     with:
       # Track go.mod (synced from the monorepo) so the analyzer never falls behind the
       # module's Go requirement; CodeQL runs with GOTOOLCHAIN=local and cannot self-upgrade.
