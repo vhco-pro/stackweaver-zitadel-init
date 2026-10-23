@@ -283,6 +283,10 @@ func main() {
 			fmt.Printf("❌ %v\n", err)
 			os.Exit(1)
 		}
+		if err := reconcileTokenLifetime(context.Background(), client); err != nil {
+			fmt.Printf("❌ %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Write credentials, K8s: patch the Secret directly; Docker Compose: write .env.

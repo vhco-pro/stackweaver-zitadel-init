@@ -97,4 +97,25 @@ func runReconcileOnly() {
 		os.Exit(1)
 	}
 	fmt.Println("✅ Identity-mail reconcile complete")
+	if err := reconcileTokenLifetime(context.Background(), client); err != nil {
+		fmt.Printf("❌ %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("✅ Token-lifetime reconcile complete")
+}
+
+// reconcileTokenLifetime holds the instance's access-token lifetime to ZITADEL_ACCESS_TOKEN_LIFETIME.
+// DefaultInstance only shapes a new instance, so without this an existing install keeps the
+// lifetime it was created with.
+func reconcileTokenLifetime(ctx context.Context, c *zitadel.Client) error {
+	lifetime, err := config.LoadAccessTokenLifetime(os.Getenv)
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("--- Reconciling the access-token lifetime ---")
+	if err := zitadel.ReconcileOIDCSettings(ctx, c.Admin(), lifetime, logf); err != nil {
+		return fmt.Errorf("reconciling OIDC settings: %w", err)
+	}
+	return nil
 }
