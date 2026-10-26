@@ -189,17 +189,50 @@ func main() {
 		extraPostLogoutURIs = append(extraPostLogoutURIs, v)
 	}
 
-	// Create or get frontend app (with extra redirect URIs for tunnel access)
-	frontendClientID, err := client.GetOrCreateFrontendApp(orgID, projectID, extraRedirectURIs, extraPostLogoutURIs)
-	if err != nil {
-		fmt.Printf("❌ Failed to get/create frontend app: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Create or get API app
 	apiClientID, apiClientSecret, err := client.GetOrCreateAPIApp(orgID, projectID)
 	if err != nil {
 		fmt.Printf("❌ Failed to get/create API app: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Create or get the confidential BFF app the API uses to complete browser sign-in. Zitadel
+	// returns its secret only at creation, so it is regenerated when none is stored yet.
+	var bffHasSecret bool
+	if k8s.IsRunning() {
+		if kc == nil {
+			var k8sErr error
+			kc, k8sErr = k8s.NewClient()
+			if k8sErr != nil {
+				fmt.Printf("❌ Failed to create Kubernetes client: %v\n", k8sErr)
+				os.Exit(1)
+			}
+		}
+		has, err := output.HasStoredKubernetesBFFSecret(kc)
+		if err != nil {
+			fmt.Printf("❌ Failed to read the stored BFF client secret: %v\n", err)
+			os.Exit(1)
+		}
+		bffHasSecret = has
+	} else {
+		bffHasSecret = output.HasStoredComposeBFFSecret(projectRoot)
+	}
+	// The localhost origin is for the Compose installs, which run on it; a deployment that names
+	// its own redirect URI (the Helm chart) does not get it.
+	bffRedirectURIs, bffPostLogoutURIs := zitadel.DefaultRedirectURIs(extraRedirectURIs, extraPostLogoutURIs, os.Getenv("FRONTEND_REDIRECT_URI") == "")
+	bffClientID, bffClientSecret, err := client.GetOrCreateBFFApp(projectID, bffRedirectURIs, bffPostLogoutURIs,
+		os.Getenv("ZITADEL_BFF_BACKCHANNEL_LOGOUT_URI"), bffHasSecret)
+	if err != nil {
+		fmt.Printf("❌ Failed to get/create BFF app: %v\n", err)
+		os.Exit(1)
+	}
+	bff := output.BFFClient{ClientID: bffClientID, ClientSecret: bffClientSecret}
+
+	// Browser sign-in goes through the BFF app only. An install from before it has a public
+	// frontend app, which is retired: left active, a script on the SPA's origin could start its own
+	// code flow with it and hold tokens in the page again. A fresh install never creates one.
+	if err := client.DeactivatePublicFrontendApp(projectID); err != nil {
+		fmt.Printf("❌ Failed to deactivate the public frontend app: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -299,7 +332,7 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if err := output.WriteKubernetesSecret(kc, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey); err != nil {
+		if err := output.WriteKubernetesSecret(kc, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey, bff); err != nil {
 			fmt.Printf("❌ Failed to patch Kubernetes secret: %v\n", err)
 			os.Exit(1)
 		}
@@ -322,21 +355,21 @@ func main() {
 		}
 
 		// Wait for the OIDC projection to be ready before restarting consumers.
-		// Consumers must not restart until Zitadel can resolve the client ID on
-		// the /oauth/v2/authorize endpoint, otherwise the frontend gets
+		// Consumers must not restart until Zitadel can resolve the BFF client ID
+		// (the one browser sign-in uses) on the /oauth/v2/authorize endpoint, otherwise the frontend gets
 		// Errors.App.NotFound until the projection catches up (up to 20+ min on
 		// a cold or resource-constrained cluster).
 		// This runs after ALL setup so time spent on app/user creation counts
 		// toward the projection warming up. 30 minutes covers the worst observed
 		// lag (~23 min). On re-runs with an existing DB projections are already
 		// populated and this returns within a few seconds.
-		client.WaitForOIDCProjection(frontendClientID, 30*time.Minute)
+		client.WaitForOIDCProjection(bffClientID, 30*time.Minute)
 
 		fmt.Println()
 		fmt.Println("--- Restarting Zitadel consumers ---")
 		k8s.RestartConsumers(kc)
 	} else {
-		if err := output.WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginUserID, idpSyncKey, complementTokenKey); err != nil {
+		if err := output.WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToken, loginUserID, idpSyncKey, complementTokenKey, bff); err != nil {
 			fmt.Printf("❌ Failed to write config files: %v\n", err)
 			os.Exit(1)
 		}
@@ -347,7 +380,7 @@ func main() {
 	fmt.Println("✅ Zitadel initialization complete!")
 	fmt.Println("==========================================")
 	fmt.Println()
-	fmt.Printf("Frontend Client ID: %s\n", frontendClientID)
+	fmt.Printf("BFF Client ID: %s\n", bffClientID)
 	fmt.Printf("API Client ID: %s\n", apiClientID)
 	fmt.Println()
 
@@ -376,4 +409,5 @@ func main() {
 
 	fmt.Println(output.ComposeClosingMessage())
 }
+
 // sync smoke test 1779753492

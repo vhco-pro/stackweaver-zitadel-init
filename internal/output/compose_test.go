@@ -3,6 +3,8 @@
 package output
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -70,5 +72,52 @@ func TestComposeMessages(t *testing.T) {
 	}
 	if !strings.Contains(closing, "docker compose up -d") {
 		t.Errorf("the closing message must name the command that applies the values: %q", closing)
+	}
+}
+
+func readEnvFile(t *testing.T, root string) map[string]string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(root, "deploy", ".env"))
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// The BFF client id and secret are written where the API reads them, and an empty secret (what
+// Zitadel returns for an app that already exists) keeps the one already stored.
+func TestWriteComposeEnv_BFFClient(t *testing.T) {
+	root := t.TempDir()
+
+	if err := WriteComposeEnv(root, "api", "api-secret", "login-tok", "login-user", "idp", "comp",
+		BFFClient{ClientID: "bff-id", ClientSecret: "bff-secret"}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	env := readEnvFile(t, root)
+	if env["ZITADEL_BFF_CLIENT_ID"] != "bff-id" || env["ZITADEL_BFF_CLIENT_SECRET"] != "bff-secret" {
+		t.Fatalf("BFF keys not written: id=%q secret=%q", env["ZITADEL_BFF_CLIENT_ID"], env["ZITADEL_BFF_CLIENT_SECRET"])
+	}
+	if !HasStoredComposeBFFSecret(root) {
+		t.Fatalf("HasStoredComposeBFFSecret must report the stored secret")
+	}
+
+	if err := WriteComposeEnv(root, "api", "", "", "login-user", "", "",
+		BFFClient{ClientID: "bff-id"}); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	if got := readEnvFile(t, root)["ZITADEL_BFF_CLIENT_SECRET"]; got != "bff-secret" {
+		t.Fatalf("an empty secret must preserve the stored one, got %q", got)
+	}
+}
+
+func TestHasStoredComposeBFFSecret_NoFile(t *testing.T) {
+	if HasStoredComposeBFFSecret(t.TempDir()) {
+		t.Fatalf("no .env means no stored secret")
 	}
 }

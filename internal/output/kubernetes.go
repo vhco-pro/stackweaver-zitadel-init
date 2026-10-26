@@ -31,7 +31,7 @@ func preserveExisting(newValue string, existing map[string]string, key string) s
 // for a key (e.g. client-secret on an existing app), the existing value in the
 // K8s Secret is preserved, mirroring the Docker Compose path which reads the
 // existing .env before writing (see WriteComposeEnv).
-func WriteKubernetesSecret(kc *k8s.Client, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey string) error {
+func WriteKubernetesSecret(kc *k8s.Client, apiClientID, apiClientSecret, loginServiceToken, idpSyncKey, complementTokenKey string, bff BFFClient) error {
 	secretName := os.Getenv("K8S_SECRET_NAME")
 	namespace := os.Getenv("K8S_NAMESPACE")
 	if namespace == "" {
@@ -47,9 +47,10 @@ func WriteKubernetesSecret(kc *k8s.Client, frontendClientID, apiClientID, apiCli
 	keyClientID := config.EnvOrDefault("K8S_KEY_CLIENT_ID", "client-id")
 	keyClientSecret := config.EnvOrDefault("K8S_KEY_CLIENT_SECRET", "client-secret")
 	keyLoginToken := config.EnvOrDefault("K8S_KEY_LOGIN_SERVICE_USER_TOKEN", "login-service-user-token")
-	keyFrontendClientID := config.EnvOrDefault("K8S_KEY_FRONTEND_CLIENT_ID", "frontend-client-id")
 	keyIdpSyncKey := config.EnvOrDefault("K8S_KEY_WEBHOOK_IDP_SYNC_KEY", "webhook-idp-sync-key")
 	keyComplementTokenKey := config.EnvOrDefault("K8S_KEY_WEBHOOK_COMPLEMENT_TOKEN_KEY", "webhook-complement-token-key")
+	keyBFFClientID := config.EnvOrDefault("K8S_KEY_BFF_CLIENT_ID", "bff-client-id")
+	keyBFFClientSecret := bffSecretKey()
 
 	// Read existing secret values so we can preserve them when Zitadel doesn't
 	// return the value (client-secret and webhook signing keys are only returned
@@ -63,9 +64,10 @@ func WriteKubernetesSecret(kc *k8s.Client, frontendClientID, apiClientID, apiCli
 		keyClientID:           apiClientID,
 		keyClientSecret:       preserveExisting(apiClientSecret, existing, keyClientSecret),
 		keyLoginToken:         preserveExisting(loginServiceToken, existing, keyLoginToken),
-		keyFrontendClientID:   frontendClientID,
 		keyIdpSyncKey:         preserveExisting(idpSyncKey, existing, keyIdpSyncKey),
 		keyComplementTokenKey: preserveExisting(complementTokenKey, existing, keyComplementTokenKey),
+		keyBFFClientID:        bff.ClientID,
+		keyBFFClientSecret:    preserveExisting(bff.ClientSecret, existing, keyBFFClientSecret),
 	}
 
 	if err := kc.PatchSecret(secretName, namespace, data); err != nil {
@@ -73,4 +75,29 @@ func WriteKubernetesSecret(kc *k8s.Client, frontendClientID, apiClientID, apiCli
 	}
 	fmt.Printf("✅ Patched Kubernetes secret %q with Zitadel credentials\n", secretName)
 	return nil
+}
+
+// bffSecretKey is the Zitadel Secret key holding the BFF client secret.
+func bffSecretKey() string {
+	return config.EnvOrDefault("K8S_KEY_BFF_CLIENT_SECRET", "bff-client-secret")
+}
+
+// HasStoredKubernetesBFFSecret reports whether the Zitadel Secret already holds a BFF client
+// secret, so an existing BFF app is not given a new secret on every pod start.
+func HasStoredKubernetesBFFSecret(kc *k8s.Client) (bool, error) {
+	secretName := os.Getenv("K8S_SECRET_NAME")
+	namespace := os.Getenv("K8S_NAMESPACE")
+	if namespace == "" {
+		if b, err := os.ReadFile(k8s.NamespacePath); err == nil {
+			namespace = strings.TrimSpace(string(b))
+		}
+	}
+	if secretName == "" || namespace == "" {
+		return false, fmt.Errorf("K8S_SECRET_NAME and K8S_NAMESPACE must be set")
+	}
+	existing, err := kc.ReadAllSecretKeys(secretName, namespace)
+	if err != nil {
+		return false, fmt.Errorf("reading the zitadel secret %q: %w", secretName, err)
+	}
+	return existing[bffSecretKey()] != "", nil
 }

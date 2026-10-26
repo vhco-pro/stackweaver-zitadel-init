@@ -25,8 +25,34 @@ func ComposeClosingMessage() string {
 	return "Configuration written. Services that were already running before this run do not have the new values yet: apply them with `docker compose up -d`."
 }
 
+// BFFClient is the confidential client the API uses to complete browser sign-in. ClientSecret is
+// empty when Zitadel did not return one (an app that already existed), and the writers then keep
+// the stored secret.
+type BFFClient struct {
+	ClientID     string
+	ClientSecret string
+}
+
+// composeBFFSecretKey is the deploy/.env key holding the BFF client secret.
+const composeBFFSecretKey = "ZITADEL_BFF_CLIENT_SECRET"
+
+// HasStoredComposeBFFSecret reports whether deploy/.env already holds a BFF client secret, so an
+// existing BFF app is not given a new secret on every run.
+func HasStoredComposeBFFSecret(projectRoot string) bool {
+	b, err := os.ReadFile(filepath.Join(projectRoot, "deploy", ".env"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, composeBFFSecretKey+"="); ok && v != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // WriteComposeEnv writes the Docker Compose deploy/.env file with all generated credentials.
-func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string) error {
+func WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string, bff BFFClient) error {
 	// Update the Zitadel-managed keys in deploy/.env, which every Compose service
 	// reads via env_file: - ./.env. Other entries in the file are preserved.
 	deployEnvPath := filepath.Join(projectRoot, "deploy", ".env")
@@ -37,7 +63,7 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 	// If any derived values are empty (Zitadel doesn't return them on GET for
 	// existing objects), preserve existing values from the current .env file.
 	// This mirrors the K8s path's preserveExisting() logic.
-	if apiClientSecret == "" || loginServiceToken == "" || idpSyncKey == "" || complementTokenKey == "" {
+	if apiClientSecret == "" || loginServiceToken == "" || idpSyncKey == "" || complementTokenKey == "" || bff.ClientSecret == "" {
 		existingEnv, _ := os.ReadFile(deployEnvPath)
 		if existingEnv != nil {
 			for _, line := range strings.Split(string(existingEnv), "\n") {
@@ -52,6 +78,9 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 				}
 				if complementTokenKey == "" && strings.HasPrefix(line, "ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=") {
 					complementTokenKey = strings.TrimPrefix(line, "ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=")
+				}
+				if bff.ClientSecret == "" && strings.HasPrefix(line, composeBFFSecretKey+"=") {
+					bff.ClientSecret = strings.TrimPrefix(line, composeBFFSecretKey+"=")
 				}
 			}
 		}
@@ -82,7 +111,6 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 	}
 
 	managed := [][2]string{
-		{"ZITADEL_FRONTEND_CLIENT_ID", frontendClientID},
 		{"ZITADEL_API_CLIENT_ID", apiClientID},
 		{"ZITADEL_API_CLIENT_SECRET", apiClientSecret},
 		{"ZITADEL_LOGIN_SERVICE_USER_TOKEN", loginServiceToken},
@@ -92,6 +120,8 @@ func WriteComposeEnv(projectRoot, frontendClientID, apiClientID, apiClientSecret
 		{"ZITADEL_TLS_MODE", tlsMode},
 		{"ZITADEL_WEBHOOK_IDP_SYNC_KEY", idpSyncKey},
 		{"ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY", complementTokenKey},
+		{"ZITADEL_BFF_CLIENT_ID", bff.ClientID},
+		{composeBFFSecretKey, bff.ClientSecret},
 	}
 
 	// Merge rather than overwrite. In the customer Compose bundle this file is
