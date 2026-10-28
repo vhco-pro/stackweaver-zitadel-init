@@ -14,37 +14,50 @@ import (
 
 // findTargetByName searches for an existing Actions V2 target by name.
 // Returns the target ID if found, empty string if not found.
-func (c *Client) findTargetByName(name string) (string, error) {
+func (c *Client) findTargetByName(name string) (*actionV2.Target, error) {
 	resp, err := c.actionService.ListTargets(c.ctx, &actionV2.ListTargetsRequest{})
 	if err != nil {
-		return "", fmt.Errorf("failed to list targets: %w", err)
+		return nil, fmt.Errorf("listing targets: %w", err)
 	}
 	for _, t := range resp.GetTargets() {
 		if t.GetName() == name {
-			return t.GetId(), nil
+			return t, nil
 		}
 	}
-	return "", nil
+	return nil, nil
 }
 
 // getOrCreateTarget creates an Actions V2 target or updates it if it already exists.
 // Returns the target ID and the signing key (only available on create/update).
-func (c *Client) getOrCreateTarget(name, endpoint string) (string, string, error) {
-	existingID, err := c.findTargetByName(name)
+// repair moves an existing target to endpoint when they differ. Callers set it only when the
+// endpoint was configured explicitly: a target someone corrected in Zitadel must not be moved back
+// to the localhost fallback.
+func (c *Client) getOrCreateTarget(name, endpoint string, repair bool) (string, string, error) {
+	existing, err := c.findTargetByName(name)
 	if err != nil {
 		return "", "", err
 	}
 
 	timeout := durationpb.New(10 * time.Second)
 
-	if existingID != "" {
-		// Target already exists, do NOT update it to avoid rotating the signing key.
-		// Key rotation causes a race condition: docker compose reads .env before
-		// zitadel-init runs, so the API container gets stale keys.
-		// The endpoint URL is stable, so there's no need to update.
-		fmt.Printf("✅ Using existing target '%s': %s\n", name, existingID)
+	if existing != nil {
+		// The signing key is never rotated here: Compose reads .env before zitadel-init runs, so
+		// the API would keep the old key. A wrong endpoint is repaired, though, because an install
+		// whose targets were registered at an address Zitadel cannot reach never receives a call.
+		// Setting only the endpoint keeps the key.
+		if repair && existing.GetEndpoint() != endpoint {
+			if _, err := c.actionService.UpdateTarget(c.ctx, &actionV2.UpdateTargetRequest{
+				Id:       existing.GetId(),
+				Endpoint: &endpoint,
+			}); err != nil {
+				return "", "", fmt.Errorf("updating the endpoint of target %q: %w", name, err)
+			}
+			fmt.Printf("✅ Moved target '%s' to %s\n", name, endpoint)
+		} else {
+			fmt.Printf("✅ Using existing target '%s': %s\n", name, existing.GetId())
+		}
 		// Return empty signing key, caller will preserve existing key from .env
-		return existingID, "", nil
+		return existing.GetId(), "", nil
 	}
 
 	// Create new target
@@ -159,11 +172,12 @@ func (c *Client) ConfigureActions() (idpSyncKey, complementTokenKey string, err 
 	// Clean up any legacy Actions V1 configuration
 	c.cleanupActionsV1()
 
-	// The API server webhook endpoint.
-	// In Docker Compose (network_mode: host), Zitadel reaches the API at localhost:8022.
-	// In Kubernetes, the Helm chart sets ACTIONS_API_BASE_URL to the in-cluster service URL.
+	// The API server webhook endpoint, as Zitadel reaches it: the Compose files set
+	// ACTIONS_API_BASE_URL to the api service on the bridge network, and the Helm chart to the
+	// in-cluster service URL. localhost suits only a Zitadel running on the API's host network.
 	apiBaseURL := os.Getenv("ACTIONS_API_BASE_URL")
-	if apiBaseURL == "" {
+	configured := apiBaseURL != ""
+	if !configured {
 		apiBaseURL = "http://localhost:8022"
 	}
 
@@ -171,7 +185,7 @@ func (c *Client) ConfigureActions() (idpSyncKey, complementTokenKey string, err 
 	// Receives the RetrieveIdentityProviderIntent response with IdP claims.
 	// Extracts groups and stores them as user metadata.
 	idpSyncEndpoint := apiBaseURL + "/api/v2/zitadel/actions/idp-sync"
-	idpSyncTargetID, idpSyncSigningKey, err := c.getOrCreateTarget("stackweaver-idp-sync", idpSyncEndpoint)
+	idpSyncTargetID, idpSyncSigningKey, err := c.getOrCreateTarget("stackweaver-idp-sync", idpSyncEndpoint, configured)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create IDP sync target: %w", err)
 	}
@@ -179,7 +193,7 @@ func (c *Client) ConfigureActions() (idpSyncKey, complementTokenKey string, err 
 	// Target 2: Complement Token webhook
 	// Reads user metadata and appends sso_groups claim to access tokens.
 	complementTokenEndpoint := apiBaseURL + "/api/v2/zitadel/actions/complement-token"
-	complementTokenTargetID, complementTokenSigningKey, err := c.getOrCreateTarget("stackweaver-complement-token", complementTokenEndpoint)
+	complementTokenTargetID, complementTokenSigningKey, err := c.getOrCreateTarget("stackweaver-complement-token", complementTokenEndpoint, configured)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create complement token target: %w", err)
 	}
