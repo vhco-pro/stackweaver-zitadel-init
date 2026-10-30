@@ -36,10 +36,20 @@ type BFFClient struct {
 // composeBFFSecretKey is the deploy/.env key holding the BFF client secret.
 const composeBFFSecretKey = "ZITADEL_BFF_CLIENT_SECRET"
 
-// HasStoredComposeBFFSecret reports whether deploy/.env already holds a BFF client secret, so an
+// ComposeEnvPath is the file the Compose run keeps its generated values in:
+// <PROJECT_ROOT>/deploy/.env, or ZITADEL_INIT_ENV_FILE when that names another path. A Compose
+// slot (scripts/compose-slot.sh) uses the override to keep a slot's values outside the checkout.
+func ComposeEnvPath(projectRoot string, getenv func(string) string) string {
+	if p := strings.TrimSpace(getenv("ZITADEL_INIT_ENV_FILE")); p != "" {
+		return p
+	}
+	return filepath.Join(projectRoot, "deploy", ".env")
+}
+
+// HasStoredComposeBFFSecret reports whether the env file already holds a BFF client secret, so an
 // existing BFF app is not given a new secret on every run.
-func HasStoredComposeBFFSecret(projectRoot string) bool {
-	b, err := os.ReadFile(filepath.Join(projectRoot, "deploy", ".env"))
+func HasStoredComposeBFFSecret(envPath string) bool {
+	b, err := os.ReadFile(filepath.Clean(envPath))
 	if err != nil {
 		return false
 	}
@@ -51,41 +61,85 @@ func HasStoredComposeBFFSecret(projectRoot string) bool {
 	return false
 }
 
-// WriteComposeEnv writes the Docker Compose deploy/.env file with all generated credentials.
-func WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string, bff BFFClient) error {
-	// Update the Zitadel-managed keys in deploy/.env, which every Compose service
-	// reads via env_file: - ./.env. Other entries in the file are preserved.
-	deployEnvPath := filepath.Join(projectRoot, "deploy", ".env")
-	if err := os.MkdirAll(filepath.Dir(deployEnvPath), 0o755); err != nil {
-		return fmt.Errorf("failed to create deploy dir: %w", err)
-	}
+// renameFile is os.Rename, replaceable in tests to fail the last step of a write.
+var renameFile = os.Rename
 
-	// If any derived values are empty (Zitadel doesn't return them on GET for
-	// existing objects), preserve existing values from the current .env file.
-	// This mirrors the K8s path's preserveExisting() logic.
-	if apiClientSecret == "" || loginServiceToken == "" || idpSyncKey == "" || complementTokenKey == "" || bff.ClientSecret == "" {
-		existingEnv, _ := os.ReadFile(deployEnvPath)
-		if existingEnv != nil {
-			for _, line := range strings.Split(string(existingEnv), "\n") {
-				if apiClientSecret == "" && strings.HasPrefix(line, "ZITADEL_API_CLIENT_SECRET=") {
-					apiClientSecret = strings.TrimPrefix(line, "ZITADEL_API_CLIENT_SECRET=")
-				}
-				if loginServiceToken == "" && strings.HasPrefix(line, "ZITADEL_LOGIN_SERVICE_USER_TOKEN=") {
-					loginServiceToken = strings.TrimPrefix(line, "ZITADEL_LOGIN_SERVICE_USER_TOKEN=")
-				}
-				if idpSyncKey == "" && strings.HasPrefix(line, "ZITADEL_WEBHOOK_IDP_SYNC_KEY=") {
-					idpSyncKey = strings.TrimPrefix(line, "ZITADEL_WEBHOOK_IDP_SYNC_KEY=")
-				}
-				if complementTokenKey == "" && strings.HasPrefix(line, "ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=") {
-					complementTokenKey = strings.TrimPrefix(line, "ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY=")
-				}
-				if bff.ClientSecret == "" && strings.HasPrefix(line, composeBFFSecretKey+"=") {
-					bff.ClientSecret = strings.TrimPrefix(line, composeBFFSecretKey+"=")
-				}
+// UpdateComposeEnv sets managed KEY=value pairs in the env file and leaves every other line as it
+// was. An empty value never replaces a stored one: Zitadel returns a secret only when it creates
+// the object, so a run that finds the object existing passes "" and the stored secret stays.
+//
+// Each call is one atomic replace (a temporary file in the same directory, synced, then renamed
+// over the original), so the provisioning flow can record every secret the moment Zitadel returns
+// it, and a write that fails, or a run killed mid-write, leaves the previous file whole. The file
+// keeps its permissions. Note the replace gives the file a new inode: a container that bind-mounts
+// the file itself (not its directory) sees the version that existed when it started.
+func UpdateComposeEnv(envPath string, managed [][2]string) error {
+	existing, err := os.ReadFile(filepath.Clean(envPath))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading %s: %w", envPath, err)
+	}
+	stored := map[string]string{}
+	for _, line := range strings.Split(string(existing), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			if _, seen := stored[strings.TrimSpace(k)]; !seen {
+				stored[strings.TrimSpace(k)] = v
 			}
 		}
 	}
+	merged := make([][2]string, 0, len(managed))
+	for _, kv := range managed {
+		if kv[1] == "" && stored[kv[0]] != "" {
+			kv[1] = stored[kv[0]]
+		}
+		merged = append(merged, kv)
+	}
+	return writeFileAtomic(envPath, []byte(mergeEnv(string(existing), merged)))
+}
 
+func writeFileAtomic(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	mode := os.FileMode(0o644)
+	if fi, statErr := os.Stat(path); statErr == nil {
+		mode = fi.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("creating a temporary file beside %s: %w", path, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = tmp.Write(data); err == nil {
+		err = tmp.Sync()
+	}
+	if err == nil {
+		err = tmp.Chmod(mode)
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", tmp.Name(), err)
+	}
+	if err = renameFile(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replacing %s: %w", path, err)
+	}
+	if d, openErr := os.Open(filepath.Clean(dir)); openErr == nil {
+		_ = d.Sync() // make the rename durable; a failure here does not undo it
+		_ = d.Close()
+	}
+	return nil
+}
+
+// WriteComposeEnv writes the full set of generated values to the Compose env file at the end of a
+// run: the credentials (each already recorded as it was created, see UpdateComposeEnv) and the
+// issuer, external host and TLS mode derived from zitadel-defaults.yaml under projectRoot.
+func WriteComposeEnv(envPath, projectRoot, apiClientID, apiClientSecret, loginServiceToken, loginServiceUserID, idpSyncKey, complementTokenKey string, bff BFFClient) error {
 	// Derive issuer URL from zitadel-defaults.yaml (ExternalDomain/Port/Secure)
 	zitadelDefaults := config.LoadZitadelDefaults(projectRoot)
 	issuerURL := config.ComputeIssuerURL(zitadelDefaults)
@@ -95,9 +149,7 @@ func WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToke
 	// the instance's ExternalDomain ALWAYS, including "localhost". On the bridge
 	// network the api reaches Zitadel at `zitadel:8080`, so the request Host
 	// (`zitadel:8080`) never matches a registered instance domain; Zitadel resolves
-	// the instance from this header instead. (Under the old network_mode: host the
-	// internal addr was `localhost:8080`, which matched the localhost instance, so
-	// the header could be empty - no longer true.) It also makes Zitadel build IdP
+	// the instance from this header instead. It also makes Zitadel build IdP
 	// callback URLs on the right domain.
 	externalHost := zitadelDefaults.ExternalDomain
 
@@ -110,7 +162,12 @@ func WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToke
 		tlsMode = "external"
 	}
 
-	managed := [][2]string{
+	// Merge rather than overwrite. In the customer Compose bundle this file is
+	// the operator's own .env (ENCRYPTION_KEY, POSTGRES_*, VITE_*), mounted into
+	// the init container; replacing it wiped those values on every init run.
+	// An empty derived value (Zitadel does not return secrets for existing
+	// objects) keeps the stored one.
+	if err := UpdateComposeEnv(envPath, [][2]string{
 		{"ZITADEL_API_CLIENT_ID", apiClientID},
 		{"ZITADEL_API_CLIENT_SECRET", apiClientSecret},
 		{"ZITADEL_LOGIN_SERVICE_USER_TOKEN", loginServiceToken},
@@ -122,27 +179,10 @@ func WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToke
 		{"ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY", complementTokenKey},
 		{"ZITADEL_BFF_CLIENT_ID", bff.ClientID},
 		{composeBFFSecretKey, bff.ClientSecret},
-	}
-
-	// Merge rather than overwrite. In the customer Compose bundle this file is
-	// the operator's own .env (ENCRYPTION_KEY, POSTGRES_*, VITE_*), mounted into
-	// the init container; replacing it wiped those values on every init run.
-	existing, err := os.ReadFile(deployEnvPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("reading %s: %w", deployEnvPath, err)
-	}
-	if err := os.WriteFile(deployEnvPath, []byte(mergeEnv(string(existing), managed)), 0o644); err != nil {
-		return fmt.Errorf("writing deploy/.env: %w", err)
+	}); err != nil {
+		return err
 	}
 	fmt.Println(ComposeEnvWrittenMessage())
-
-	// NOTE: Only deploy/.env is written.
-	// All docker-compose services use env_file: - ./.env which reads from deploy/.env
-	// docker-compose.yml uses ${ZITADEL_ISSUER:-http://localhost:8080} substitution
-	// so the issuer URL is automatically propagated to API and frontend.
-	// On first run (no .env yet), the fallback http://localhost:8080 is used.
-	// After init completes, restart services to pick up the correct issuer.
-
 	return nil
 }
 

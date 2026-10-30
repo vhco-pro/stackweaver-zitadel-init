@@ -20,6 +20,7 @@ type fakeApps struct {
 	apps        map[string]*applicationV2.Application // by name
 	created     *applicationV2.CreateOIDCApplicationRequest
 	updated     *applicationV2.UpdateOIDCApplicationConfigurationRequest
+	updates     int
 	regenerated int
 	deactivated []string
 }
@@ -68,6 +69,9 @@ func (f *fakeApps) CreateApplication(_ context.Context, in *applicationV2.Create
 			PostLogoutRedirectUris:   cfg.GetPostLogoutRedirectUris(),
 			IdTokenUserinfoAssertion: cfg.GetIdTokenUserinfoAssertion(),
 			BackChannelLogoutUri:     cfg.GetBackChannelLogoutUri(),
+			AuthMethodType:           cfg.GetAuthMethodType(),
+			GrantTypes:               cfg.GetGrantTypes(),
+			AccessTokenType:          cfg.GetAccessTokenType(),
 		}},
 	}
 	f.apps[in.GetName()] = app
@@ -80,7 +84,28 @@ func (f *fakeApps) CreateApplication(_ context.Context, in *applicationV2.Create
 }
 
 func (f *fakeApps) UpdateApplication(_ context.Context, in *applicationV2.UpdateApplicationRequest, _ ...grpc.CallOption) (*applicationV2.UpdateApplicationResponse, error) {
-	f.updated = in.GetOidcConfiguration()
+	u := in.GetOidcConfiguration()
+	f.updated = u
+	f.updates++
+	// Apply the update, so a later run sees what an earlier one wrote, as it would in Zitadel.
+	if a := f.byID(in.GetApplicationId()); a != nil && u != nil {
+		cfg := a.GetOidcConfiguration()
+		cfg.RedirectUris = u.GetRedirectUris()
+		cfg.PostLogoutRedirectUris = u.GetPostLogoutRedirectUris()
+		cfg.GrantTypes = u.GetGrantTypes()
+		if u.AuthMethodType != nil {
+			cfg.AuthMethodType = u.GetAuthMethodType()
+		}
+		if u.AccessTokenType != nil {
+			cfg.AccessTokenType = u.GetAccessTokenType()
+		}
+		if u.IdTokenUserinfoAssertion != nil {
+			cfg.IdTokenUserinfoAssertion = u.GetIdTokenUserinfoAssertion()
+		}
+		if u.BackChannelLogoutUri != nil {
+			cfg.BackChannelLogoutUri = u.GetBackChannelLogoutUri()
+		}
+	}
 	return &applicationV2.UpdateApplicationResponse{}, nil
 }
 
