@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +21,11 @@ func main() {
 	// The Helm reconcile Job (#829 D9) applies only the identity-mail settings and exits.
 	if reconcileOnly(os.Getenv) {
 		runReconcileOnly()
+		return
+	}
+	// The Compose one-shot that registers the URLs naming the API once it is healthy (apiurls.go).
+	if apiURLsOnly(os.Getenv) {
+		runAPIURLs()
 		return
 	}
 
@@ -189,137 +195,142 @@ func main() {
 		extraPostLogoutURIs = append(extraPostLogoutURIs, v)
 	}
 
-	// Create or get API app
-	apiClientID, apiClientSecret, err := client.GetOrCreateAPIApp(orgID, projectID)
-	if err != nil {
-		fmt.Printf("❌ Failed to get/create API app: %v\n", err)
-		os.Exit(1)
+	// The settings that name the API. On a fresh Compose install the api host does not resolve
+	// yet, so they wait for the api-urls run (see apiurls.go).
+	apiURLSettings := loadAPIURLs(os.Getenv)
+	bffBackChannelURI, actionsOptions := apiURLSettings.firstRun(k8s.IsRunning(), internalAddr, lookupHost)
+	if bffBackChannelURI != apiURLSettings.backChannelLogout || actionsOptions.PendingBase != "" {
+		fmt.Println("ℹ️  The api host does not resolve yet (a fresh install): the BFF back-channel logout URI and the Actions")
+		fmt.Println("   target addresses are registered by the api-urls run (zitadel-api-urls) once the API is healthy")
 	}
 
-	// Create or get the confidential BFF app the API uses to complete browser sign-in. Zitadel
-	// returns its secret only at creation, so it is regenerated when none is stored yet.
-	var bffHasSecret bool
-	if k8s.IsRunning() {
-		if kc == nil {
-			var k8sErr error
-			kc, k8sErr = k8s.NewClient()
-			if k8sErr != nil {
-				fmt.Printf("❌ Failed to create Kubernetes client: %v\n", k8sErr)
-				os.Exit(1)
+	// In Compose every value is recorded in the env file the moment Zitadel returns it, so a run
+	// that stops later keeps the secrets Zitadel hands out only once. Kubernetes writes its Secret
+	// at the end, as before.
+	envPath := output.ComposeEnvPath(projectRoot, os.Getenv)
+	record := func(values [][2]string) error {
+		if k8s.IsRunning() {
+			return nil
+		}
+		return output.UpdateComposeEnv(envPath, values)
+	}
+
+	var (
+		apiClientID, apiClientSecret   string
+		bff                            output.BFFClient
+		loginUserID, loginServiceToken string
+		idpSyncKey, complementTokenKey string
+	)
+	steps := []provisionStep{
+		{"API app", func() ([][2]string, error) {
+			var err error
+			apiClientID, apiClientSecret, err = client.GetOrCreateAPIApp(orgID, projectID)
+			return [][2]string{{"ZITADEL_API_CLIENT_ID", apiClientID}, {"ZITADEL_API_CLIENT_SECRET", apiClientSecret}}, err
+		}},
+		// The confidential BFF app the API uses to complete browser sign-in. Zitadel returns its
+		// secret only at creation, so it is regenerated when none is stored yet.
+		{"BFF app", func() ([][2]string, error) {
+			var bffHasSecret bool
+			if k8s.IsRunning() {
+				if kc == nil {
+					var k8sErr error
+					if kc, k8sErr = k8s.NewClient(); k8sErr != nil {
+						return nil, fmt.Errorf("creating the Kubernetes client: %w", k8sErr)
+					}
+				}
+				has, err := output.HasStoredKubernetesBFFSecret(kc)
+				if err != nil {
+					return nil, fmt.Errorf("reading the stored BFF client secret: %w", err)
+				}
+				bffHasSecret = has
+			} else {
+				bffHasSecret = output.HasStoredComposeBFFSecret(envPath)
 			}
-		}
-		has, err := output.HasStoredKubernetesBFFSecret(kc)
-		if err != nil {
-			fmt.Printf("❌ Failed to read the stored BFF client secret: %v\n", err)
-			os.Exit(1)
-		}
-		bffHasSecret = has
-	} else {
-		bffHasSecret = output.HasStoredComposeBFFSecret(projectRoot)
-	}
-	// The localhost origin is for the Compose installs, which run on it; a deployment that names
-	// its own redirect URI (the Helm chart) does not get it.
-	bffRedirectURIs, bffPostLogoutURIs := zitadel.DefaultRedirectURIs(extraRedirectURIs, extraPostLogoutURIs, os.Getenv("FRONTEND_REDIRECT_URI") == "")
-	bffClientID, bffClientSecret, err := client.GetOrCreateBFFApp(projectID, bffRedirectURIs, bffPostLogoutURIs,
-		os.Getenv("ZITADEL_BFF_BACKCHANNEL_LOGOUT_URI"), bffHasSecret)
-	if err != nil {
-		fmt.Printf("❌ Failed to get/create BFF app: %v\n", err)
-		os.Exit(1)
-	}
-	bff := output.BFFClient{ClientID: bffClientID, ClientSecret: bffClientSecret}
-
-	// Browser sign-in goes through the BFF app only. An install from before it has a public
-	// frontend app, which is retired: left active, a script on the SPA's origin could start its own
-	// code flow with it and hold tokens in the page again. A fresh install never creates one.
-	if err := client.DeactivatePublicFrontendApp(projectID); err != nil {
-		fmt.Printf("❌ Failed to deactivate the public frontend app: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Ensure login service user and PAT for the Login v2 UI
-	loginUserID, loginServiceToken, err := client.EnsureLoginServiceUser()
-	if err != nil {
-		fmt.Printf("❌ Failed to prepare login service user: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("✅ Login service user ready: %s\n", loginUserID)
-
-	// Ensure the Login V2 BaseURI points to the Stackweaver SPA /login routes.
-	// The ConfigMap's DefaultInstance.Features.LoginV2.BaseURI in zitadel-defaults.yaml
-	// only applies on first Zitadel init and uses the internal service name (not
-	// browser-reachable). This call updates the database via the Feature API on every
-	// zitadel-init run, so the URL stays correct after domain changes. Defaults to the
-	// local compose frontend at localhost:5173/login; Helm overrides via LOGIN_UI_BASE_URL.
-	loginUIBaseURL := os.Getenv("LOGIN_UI_BASE_URL")
-	if loginUIBaseURL == "" {
-		loginUIBaseURL = "http://localhost:5173/login"
-	}
-	if err := client.EnsureLoginV2BaseURI(loginUIBaseURL); err != nil {
-		fmt.Printf("⚠️  Warning: could not set Login V2 BaseURI: %v\n", err)
-	}
-
-	// Ensure trusted + custom domains so Zitadel is reachable on both ExternalDomain and localhost.
-	// Sources: env ZITADEL_CUSTOM_DOMAINS (comma-separated) or deploy/zitadel-init.yaml (custom_domains).
-	// When ExternalDomain != localhost, "localhost" is automatically added so internal services
-	// can still reach Zitadel without going through the external domain.
-	domains := config.LoadCustomDomainsConfig(projectRoot)
-
-	// Auto-add localhost when ExternalDomain is a real domain
-	zitadelDefaults := config.LoadZitadelDefaults(projectRoot)
-	if zitadelDefaults.ExternalDomain != "localhost" && zitadelDefaults.ExternalDomain != "" {
-		// Ensure localhost is in the list so internal services work
-		hasLocalhost := false
-		for _, d := range domains {
-			if d == "localhost" {
-				hasLocalhost = true
-				break
+			// The localhost origin is for the Compose installs, which run on it; a deployment that
+			// names its own redirect URI (the Helm chart) does not get it.
+			redirectURIs, postLogoutURIs := zitadel.DefaultRedirectURIs(extraRedirectURIs, extraPostLogoutURIs, os.Getenv("FRONTEND_REDIRECT_URI") == "")
+			id, secret, err := client.GetOrCreateBFFApp(projectID, redirectURIs, postLogoutURIs, bffBackChannelURI, bffHasSecret)
+			bff = output.BFFClient{ClientID: id, ClientSecret: secret}
+			return [][2]string{{"ZITADEL_BFF_CLIENT_ID", id}, {"ZITADEL_BFF_CLIENT_SECRET", secret}}, err
+		}},
+		// Browser sign-in goes through the BFF app only. An install from before it has a public
+		// frontend app, which is retired: left active, a script on the SPA's origin could start its
+		// own code flow with it and hold tokens in the page again. A fresh install never creates one.
+		{"public frontend app", func() ([][2]string, error) {
+			return nil, client.DeactivatePublicFrontendApp(projectID)
+		}},
+		// The login service user and its PAT for the Login v2 UI.
+		{"login service user", func() ([][2]string, error) {
+			var err error
+			loginUserID, loginServiceToken, err = client.EnsureLoginServiceUser()
+			if err == nil {
+				fmt.Printf("✅ Login service user ready: %s\n", loginUserID)
 			}
-		}
-		if !hasLocalhost {
-			domains = append(domains, "localhost")
-			fmt.Printf("ℹ️  ExternalDomain is %q, auto-adding localhost as custom domain for internal access\n", zitadelDefaults.ExternalDomain)
-		}
+			return [][2]string{{"ZITADEL_LOGIN_SERVICE_USER_ID", loginUserID}, {"ZITADEL_LOGIN_SERVICE_USER_TOKEN", loginServiceToken}}, err
+		}},
+		// The Login V2 BaseURI points at the Stackweaver SPA /login routes. The ConfigMap's
+		// DefaultInstance.Features.LoginV2.BaseURI in zitadel-defaults.yaml only applies on first
+		// Zitadel init and uses the internal service name (not browser-reachable). This call updates
+		// the database via the Feature API on every zitadel-init run, so the URL stays correct after
+		// domain changes. Defaults to the local compose frontend at localhost:5173/login; Helm
+		// overrides via LOGIN_UI_BASE_URL.
+		{"Login V2 BaseURI", func() ([][2]string, error) {
+			loginUIBaseURL := os.Getenv("LOGIN_UI_BASE_URL")
+			if loginUIBaseURL == "" {
+				loginUIBaseURL = "http://localhost:5173/login"
+			}
+			if err := client.EnsureLoginV2BaseURI(loginUIBaseURL); err != nil {
+				fmt.Printf("⚠️  Warning: could not set Login V2 BaseURI: %v\n", err)
+			}
+			return nil, nil
+		}},
+		// Trusted + custom domains so Zitadel is reachable on both ExternalDomain and localhost.
+		// Sources: env ZITADEL_CUSTOM_DOMAINS (comma-separated) or deploy/zitadel-init.yaml
+		// (custom_domains). When ExternalDomain != localhost, "localhost" is automatically added so
+		// internal services can still reach Zitadel without going through the external domain.
+		{"trusted domains", func() ([][2]string, error) {
+			domains := config.LoadCustomDomainsConfig(projectRoot)
+			zitadelDefaults := config.LoadZitadelDefaults(projectRoot)
+			if zitadelDefaults.ExternalDomain != "localhost" && zitadelDefaults.ExternalDomain != "" && !slices.Contains(domains, "localhost") {
+				domains = append(domains, "localhost")
+				fmt.Printf("ℹ️  ExternalDomain is %q, auto-adding localhost as custom domain for internal access\n", zitadelDefaults.ExternalDomain)
+			}
+			if len(domains) == 0 {
+				fmt.Println("ℹ️  No custom domains configured (set custom_domains in zitadel-init.yaml or ZITADEL_CUSTOM_DOMAINS)")
+				return nil, nil
+			}
+			fmt.Println()
+			fmt.Println("--- Ensuring trusted domains ---")
+			return nil, client.EnsureTrustedDomains(domains)
+		}},
+		// External identity providers (Azure AD, Generic OIDC), only when their variables are set.
+		{"identity providers", func() ([][2]string, error) {
+			return nil, client.ConfigureIdentityProviders()
+		}},
+		// Zitadel Actions V2 for SSO group claim passthrough: external webhooks instead of embedded
+		// JavaScript (V1 doesn't work with Login V2), only when an external IdP is set up.
+		{"Zitadel Actions", func() ([][2]string, error) {
+			var err error
+			idpSyncKey, complementTokenKey, err = client.ConfigureActions(actionsOptions)
+			return [][2]string{{"ZITADEL_WEBHOOK_IDP_SYNC_KEY", idpSyncKey}, {"ZITADEL_WEBHOOK_COMPLEMENT_TOKEN_KEY", complementTokenKey}}, err
+		}},
 	}
-
-	if len(domains) > 0 {
-		fmt.Println()
-		fmt.Println("--- Ensuring trusted domains ---")
-		if err := client.EnsureTrustedDomains(domains); err != nil {
-			fmt.Printf("❌ Failed to ensure trusted domains: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		fmt.Println("ℹ️  No custom domains configured (set custom_domains in zitadel-init.yaml or ZITADEL_CUSTOM_DOMAINS)")
-	}
-
-	// Configure external identity providers (Azure AD, Generic OIDC)
-	// Only configures if the relevant environment variables are set
-	if err := client.ConfigureIdentityProviders(); err != nil {
-		fmt.Printf("❌ Failed to configure identity providers: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Configure Zitadel Actions V2 for SSO group claim passthrough
-	// Uses external webhooks instead of embedded JavaScript (V1 doesn't work with Login V2)
-	// Only configures if at least one external IdP is set up
-	idpSyncKey, complementTokenKey, err := client.ConfigureActions()
-	if err != nil {
-		fmt.Printf("❌ Failed to configure Zitadel Actions: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Identity mail (#829): in Compose this container is separate from Zitadel, so a failure here
 	// stops the run loudly. In Kubernetes the Helm reconcile Job owns these steps, because a crash
 	// loop in this sidecar would take the whole Zitadel pod, and every login, down with it.
 	if !k8s.IsRunning() {
-		if err := reconcileIdentityMail(context.Background(), client, false); err != nil {
-			fmt.Printf("❌ %v\n", err)
-			os.Exit(1)
-		}
-		if err := reconcileTokenLifetime(context.Background(), client); err != nil {
-			fmt.Printf("❌ %v\n", err)
-			os.Exit(1)
-		}
+		steps = append(steps,
+			provisionStep{"identity mail", func() ([][2]string, error) {
+				return nil, reconcileIdentityMail(context.Background(), client, false)
+			}},
+			provisionStep{"token lifetime", func() ([][2]string, error) {
+				return nil, reconcileTokenLifetime(context.Background(), client)
+			}},
+		)
+	}
+	if err := runProvisionSteps(steps, record); err != nil {
+		fmt.Printf("❌ %v\n", err)
+		os.Exit(1)
 	}
 
 	// Write credentials, K8s: patch the Secret directly; Docker Compose: write .env.
@@ -363,13 +374,13 @@ func main() {
 		// toward the projection warming up. 30 minutes covers the worst observed
 		// lag (~23 min). On re-runs with an existing DB projections are already
 		// populated and this returns within a few seconds.
-		client.WaitForOIDCProjection(bffClientID, 30*time.Minute)
+		client.WaitForOIDCProjection(bff.ClientID, 30*time.Minute)
 
 		fmt.Println()
 		fmt.Println("--- Restarting Zitadel consumers ---")
 		k8s.RestartConsumers(kc)
 	} else {
-		if err := output.WriteComposeEnv(projectRoot, apiClientID, apiClientSecret, loginServiceToken, loginUserID, idpSyncKey, complementTokenKey, bff); err != nil {
+		if err := output.WriteComposeEnv(envPath, projectRoot, apiClientID, apiClientSecret, loginServiceToken, loginUserID, idpSyncKey, complementTokenKey, bff); err != nil {
 			fmt.Printf("❌ Failed to write config files: %v\n", err)
 			os.Exit(1)
 		}
@@ -380,7 +391,7 @@ func main() {
 	fmt.Println("✅ Zitadel initialization complete!")
 	fmt.Println("==========================================")
 	fmt.Println()
-	fmt.Printf("BFF Client ID: %s\n", bffClientID)
+	fmt.Printf("BFF Client ID: %s\n", bff.ClientID)
 	fmt.Printf("API Client ID: %s\n", apiClientID)
 	fmt.Println()
 

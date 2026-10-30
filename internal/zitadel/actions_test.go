@@ -14,9 +14,10 @@ import (
 // methods getOrCreateTarget does not call panic if they are reached.
 type fakeActions struct {
 	actionV2.ActionServiceClient
-	targets []*actionV2.Target
-	updates []*actionV2.UpdateTargetRequest
-	created int
+	targets    []*actionV2.Target
+	updates    []*actionV2.UpdateTargetRequest
+	created    int
+	executions int
 }
 
 func (f *fakeActions) ListTargets(context.Context, *actionV2.ListTargetsRequest, ...grpc.CallOption) (*actionV2.ListTargetsResponse, error) {
@@ -35,8 +36,9 @@ func (f *fakeActions) UpdateTarget(_ context.Context, in *actionV2.UpdateTargetR
 
 func (f *fakeActions) CreateTarget(_ context.Context, in *actionV2.CreateTargetRequest, _ ...grpc.CallOption) (*actionV2.CreateTargetResponse, error) {
 	f.created++
-	f.targets = append(f.targets, &actionV2.Target{Id: "new", Name: in.GetName(), Endpoint: in.GetEndpoint()})
-	return &actionV2.CreateTargetResponse{Id: "new", SigningKey: "key"}, nil
+	id := "new-" + in.GetName()
+	f.targets = append(f.targets, &actionV2.Target{Id: id, Name: in.GetName(), Endpoint: in.GetEndpoint()})
+	return &actionV2.CreateTargetResponse{Id: id, SigningKey: "key-" + in.GetName()}, nil
 }
 
 func TestGetOrCreateTarget_RepairsAStaleEndpointWithoutRotatingTheKey(t *testing.T) {

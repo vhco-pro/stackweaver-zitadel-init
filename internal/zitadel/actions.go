@@ -135,6 +135,31 @@ func (c *Client) findActionByName(name string) (string, error) {
 	return "", nil
 }
 
+// Action target names. The API recognises each webhook by its endpoint path, not by name.
+const (
+	idpSyncTargetName         = "stackweaver-idp-sync"
+	complementTokenTargetName = "stackweaver-complement-token"
+	idpSyncPath               = "/api/v2/zitadel/actions/idp-sync"
+	complementTokenPath       = "/api/v2/zitadel/actions/complement-token" //nolint:gosec // G101: an API path, not a credential
+)
+
+// ActionsOptions says where ConfigureActions points the webhook targets.
+type ActionsOptions struct {
+	// BaseURL is the API as Zitadel reaches it (ACTIONS_API_BASE_URL). Empty falls back to
+	// http://localhost:8022, which suits only a Zitadel on the API's host network and is never
+	// used to move an existing target.
+	BaseURL string
+	// PendingBase, when set, means the API's host cannot be saved yet: Zitadel resolves a URL's
+	// host when it stores it, and on a fresh Compose install the api container starts only after
+	// zitadel-init. New targets are then created under this address (on Zitadel itself), so their
+	// signing keys still reach .env before the API starts, and existing targets are left alone.
+	// The api-urls run moves them to BaseURL once the API is up.
+	PendingBase string
+	// RequireExisting is the api-urls run: it moves existing targets to BaseURL and never creates
+	// one, because a created target's signing key would not reach the API already running.
+	RequireExisting bool
+}
+
 // ConfigureActions sets up Zitadel Actions V2 for SSO group claim passthrough.
 //
 // Actions V2 uses external HTTP webhooks instead of embedded JavaScript.
@@ -156,8 +181,8 @@ func (c *Client) findActionByName(name string) (string, error) {
 //	The webhook reads the sso_groups metadata and includes it as a custom claim in the JWT,
 //	which StackWeaver then uses for automatic team assignment.
 //
-// Returns the signing keys for the created targets so they can be passed to the API server.
-func (c *Client) ConfigureActions() (idpSyncKey, complementTokenKey string, err error) {
+// Returns the signing keys of targets it created, so they can be passed to the API server.
+func (c *Client) ConfigureActions(opts ActionsOptions) (idpSyncKey, complementTokenKey string, err error) {
 	azureClientID := os.Getenv("AZURE_AD_CLIENT_ID")
 	oidcClientID := os.Getenv("OIDC_IDP_CLIENT_ID")
 
@@ -169,31 +194,46 @@ func (c *Client) ConfigureActions() (idpSyncKey, complementTokenKey string, err 
 	fmt.Println()
 	fmt.Println("--- Configuring Zitadel Actions V2 for SSO Group Claims ---")
 
-	// Clean up any legacy Actions V1 configuration
-	c.cleanupActionsV1()
-
 	// The API server webhook endpoint, as Zitadel reaches it: the Compose files set
 	// ACTIONS_API_BASE_URL to the api service on the bridge network, and the Helm chart to the
 	// in-cluster service URL. localhost suits only a Zitadel running on the API's host network.
-	apiBaseURL := os.Getenv("ACTIONS_API_BASE_URL")
+	apiBaseURL := opts.BaseURL
 	configured := apiBaseURL != ""
 	if !configured {
 		apiBaseURL = "http://localhost:8022"
+	}
+	base, repair := apiBaseURL, configured
+	if opts.PendingBase != "" {
+		base, repair = opts.PendingBase, false
+		fmt.Printf("ℹ️  The API is not reachable yet; new targets wait at %s until the api-urls run moves them\n", opts.PendingBase)
+	}
+
+	if opts.RequireExisting {
+		for _, name := range []string{idpSyncTargetName, complementTokenTargetName} {
+			existing, err := c.findTargetByName(name)
+			if err != nil {
+				return "", "", err
+			}
+			if existing == nil {
+				return "", "", fmt.Errorf("target %q does not exist; zitadel-init creates it, so run zitadel-init first", name)
+			}
+		}
+	} else {
+		// Clean up any legacy Actions V1 configuration
+		c.cleanupActionsV1()
 	}
 
 	// Target 1: IDP Sync webhook
 	// Receives the RetrieveIdentityProviderIntent response with IdP claims.
 	// Extracts groups and stores them as user metadata.
-	idpSyncEndpoint := apiBaseURL + "/api/v2/zitadel/actions/idp-sync"
-	idpSyncTargetID, idpSyncSigningKey, err := c.getOrCreateTarget("stackweaver-idp-sync", idpSyncEndpoint, configured)
+	idpSyncTargetID, idpSyncSigningKey, err := c.getOrCreateTarget(idpSyncTargetName, base+idpSyncPath, repair)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create IDP sync target: %w", err)
 	}
 
 	// Target 2: Complement Token webhook
 	// Reads user metadata and appends sso_groups claim to access tokens.
-	complementTokenEndpoint := apiBaseURL + "/api/v2/zitadel/actions/complement-token"
-	complementTokenTargetID, complementTokenSigningKey, err := c.getOrCreateTarget("stackweaver-complement-token", complementTokenEndpoint, configured)
+	complementTokenTargetID, complementTokenSigningKey, err := c.getOrCreateTarget(complementTokenTargetName, base+complementTokenPath, repair)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create complement token target: %w", err)
 	}

@@ -298,6 +298,25 @@ func (c *Client) reconcileBFFApp(appID, projectID string, cfg *applicationV2.OID
 	return nil
 }
 
+// EnsureBFFBackChannelLogout gives the existing BFF app the back-channel logout URI, through the
+// same merge reconcileBFFApp applies on every run: redirect URIs are kept and nothing is written
+// when the app already has it. It is the api-urls run's half of a fresh Compose install, where the
+// first run creates the app without the URI because Zitadel cannot yet resolve the api host.
+func (c *Client) EnsureBFFBackChannelLogout(projectID, backChannelLogoutURI string) error {
+	app, err := c.findApp(projectID, bffAppName)
+	if err != nil {
+		return err
+	}
+	if app == nil {
+		return fmt.Errorf("the %q app does not exist; zitadel-init creates it, so run zitadel-init first", bffAppName)
+	}
+	_, cfg, err := c.frontendOIDCClientID(app.GetApplicationId())
+	if err != nil {
+		return err
+	}
+	return c.reconcileBFFApp(app.GetApplicationId(), projectID, cfg, nil, nil, backChannelLogoutURI)
+}
+
 // DeactivatePublicFrontendApp switches off the SPA's public client once the BFF client exists, so
 // no path on the SPA's origin can redeem an authorization code for tokens. A missing or already
 // inactive app is left as it is.
