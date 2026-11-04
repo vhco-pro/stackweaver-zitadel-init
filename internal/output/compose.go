@@ -3,6 +3,8 @@
 package output
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,12 +164,20 @@ func WriteComposeEnv(envPath, projectRoot, apiClientID, apiClientSecret, loginSe
 		tlsMode = "external"
 	}
 
+	existing, _ := os.ReadFile(filepath.Clean(envPath))
+	hosted, err := hostedSecret(string(existing))
+	if err != nil {
+		return err
+	}
+
 	// Merge rather than overwrite. In the customer Compose bundle this file is
 	// the operator's own .env (ENCRYPTION_KEY, POSTGRES_*, VITE_*), mounted into
 	// the init container; replacing it wiped those values on every init run.
 	// An empty derived value (Zitadel does not return secrets for existing
 	// objects) keeps the stored one.
 	if err := UpdateComposeEnv(envPath, [][2]string{
+		// The hosted launchers register with it and the API accepts it (#933, D9, D14).
+		{"STACKWEAVER_HOSTED_SECRET", hosted},
 		{"ZITADEL_API_CLIENT_ID", apiClientID},
 		{"ZITADEL_API_CLIENT_SECRET", apiClientSecret},
 		{"ZITADEL_LOGIN_SERVICE_USER_TOKEN", loginServiceToken},
@@ -184,6 +194,22 @@ func WriteComposeEnv(envPath, projectRoot, apiClientID, apiClientSecret, loginSe
 	}
 	fmt.Println(ComposeEnvWrittenMessage())
 	return nil
+}
+
+// hostedSecret is the deployment's hosted registration secret (#933, D9, D14): the one an existing
+// env file holds, else a newly generated one. It is a generated value, so it lives in the
+// auto-generated .env and survives every later init run.
+func hostedSecret(existing string) (string, error) {
+	for _, line := range strings.Split(existing, "\n") {
+		if v, ok := strings.CutPrefix(line, "STACKWEAVER_HOSTED_SECRET="); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v), nil
+		}
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating the hosted registration secret: %w", err)
+	}
+	return "tfe-" + hex.EncodeToString(buf), nil
 }
 
 // mergeEnv sets each managed KEY=value in an env file's content: a key already

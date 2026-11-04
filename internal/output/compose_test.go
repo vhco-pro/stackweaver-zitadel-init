@@ -210,3 +210,23 @@ func TestUpdateComposeEnv_CreatesTheFile(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// The hosted registration secret is a generated value of deploy/.env (#933, D14): made once, then
+// kept across every later init run, so the launchers and the API keep agreeing.
+func TestHostedSecret(t *testing.T) {
+	first, err := hostedSecret("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) < 40 {
+		t.Errorf("generated hosted secret %q is too short", first)
+	}
+	again, err := hostedSecret("ENCRYPTION_KEY=abc\nSTACKWEAVER_HOSTED_SECRET=" + first + "\n")
+	if err != nil || again != first {
+		t.Errorf("a re-run produced %q (%v), want the existing %q kept", again, err, first)
+	}
+	other, err := hostedSecret("")
+	if err != nil || other == first {
+		t.Errorf("two fresh installs share the hosted secret %q", other)
+	}
+}
